@@ -88,6 +88,7 @@ def test_voice_tts_sanitizer(clean_spoken_fn):
         ("```python\nprint('hello')\n``` Done!", "Done!"),
         ("File saved at C:\\Users\\Dog\\Downloads\\report.pdf", "File saved at report.pdf"),
         ("Contents of Downloads (344 items total):\n  [DIR] Subdir\n  file1.mp4 (45 MB)\n  ... and 342 more items", "I found 344 items in your Downloads folder. I have displayed them on your screen."),
+        ("I'll set the brightness, adjust the volume, and open YouTube for you.\n(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness", "I'll set the brightness, adjust the volume, and open YouTube for you."),
     ]
 
     for raw, expected in test_cases:
@@ -163,10 +164,19 @@ def test_tool_dispatch():
     print("  Close App (nonexistent):", res_close)
     assert "was closed or not running" in res_close or "Closed" in res_close
 
-    # 2. Volume control
+    # 2. Volume control (relative & exact percentage)
     res_vol = tools.adjust_volume("up")
     print("  Volume Up:", res_vol)
     assert "Volume" in res_vol
+
+    res_vol_set = tools.adjust_volume("set", 50)
+    print("  Volume Set 50%:", res_vol_set)
+    assert "50" in res_vol_set
+
+    # 2b. Brightness control
+    res_bright = tools.adjust_brightness("set", 100)
+    print("  Brightness Set 100%:", res_bright)
+    assert "100" in res_bright or "Brightness" in res_bright
 
     # 3. List folder
     res_list = tools.list_folder_contents("project")
@@ -246,6 +256,31 @@ def test_tool_dispatch():
         assert "already organized" in res_org2
     finally:
         shutil.rmtree(test_dir, ignore_errors=True)
+
+    # 12. Smart Work Folder Resolution
+    work_path, work_display = tools.resolve_folder_path("work")
+    print(f"  Work Folder Resolution: {work_display} -> {work_path}")
+    assert os.path.exists(work_path), f"Resolved work path does not exist: {work_path}"
+    assert "work" in work_path.lower()
+
+    # 13. System Health Telemetry
+    health = tools.get_system_health()
+    print("  System Health Telemetry:\n   ", health[:120] + "...")
+    assert "CPU is at" in health and "RAM is at" in health
+    assert "Top apps consuming" in health
+
+    # 14. Fast System Agent Intent Interceptor
+    h_work, act_work, _, _ = tools.detect_and_run_intent("open work folder")
+    assert h_work is True
+    print("  Fast Intent ('open work folder'): Handled")
+
+    h_ss, act_ss, _, _ = tools.detect_and_run_intent("open the last screenshot")
+    assert h_ss is True
+    print("  Fast Intent ('open the last screenshot'): Handled")
+
+    h_sys, act_sys, _, _ = tools.detect_and_run_intent("what is the system condition")
+    assert h_sys is True
+    print("  Fast Intent ('what is the system condition'): Handled")
 
     print("Tool Execution Suite: 100% Passed.")
 

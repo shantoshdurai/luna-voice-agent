@@ -186,6 +186,8 @@ SYSTEM_PROMPT = """You are Jarvis, a fast personal voice AI assistant and pair p
 VOICE & TTS GUIDELINES:
 - Every word you output will be spoken aloud to the user via Text-to-Speech (TTS). Speak in 1-2 natural, conversational sentences.
 - NEVER include raw URLs (like https://...), query parameters, website links, slashes, or plus signs in spoken replies.
+- MULTI-ACTION COMMANDS: If the user requests multiple actions in a single command (e.g. "set brightness to 100, set sound to 50, and open youtube"), you MUST invoke ALL corresponding tools together in that single turn. NEVER drop actions or try to run raw PowerShell scripts for tasks that have dedicated tools.
+- BRIGHTNESS & VOLUME: Always call adjust_brightness to change or set screen brightness (e.g. 100%), and call adjust_volume to change or set audio volume level (e.g. 50%). Never use run_command or write WMI scripts for brightness or volume.
 - When asked to close an app, browser, tab, or window, ALWAYS call the close_app tool.
 - When asked to shut down, quit, exit, or stop Jarvis, call exit_jarvis. Never lecture about Terminator or give multi-paragraph options.
 - When asked to shut down the PC or computer, call system_control(action='shutdown_pc').
@@ -196,7 +198,10 @@ VOICE & TTS GUIDELINES:
 - The user's default browser is Helium (not Firefox or Chrome). Always use or assume Helium when asked to open websites, browser tabs, or videos unless another browser is explicitly named.
 - When asked to organize, sort, arrange, or clean up files in a folder (such as Downloads or Desktop), ALWAYS call organize_folder. Never just list files and stop!
 - When asked to create a folder or directory, call create_folder.
-- When asked to open apps, websites, or folders, call the appropriate tool.
+- When asked to open apps, websites, or folders, call the appropriate tool. If asked to open the work folder, call open_folder(folder_path='work').
+- When asked to open the last or latest screenshot, call open_last_screenshot.
+- When asked about system condition, hardware telemetry, CPU or GPU usage, or what processes/systems are taking the most memory, call get_system_health.
+- When asked to end, kill, or terminate an app or process, call close_app.
 - When asked what apps or software are installed on the PC, call list_installed_apps.
 - When asked to run terminal commands, inspect files, or read code, use run_command, search_files, read_file, or list_folder_contents.
 - When reporting folder contents, summarize the count and top 3-5 items briefly in 1 conversational sentence. NEVER read long lists of filenames aloud.
@@ -392,6 +397,70 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "open_last_screenshot",
+            "description": "Opens the most recent screenshot taken on the computer in the default image viewer.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_health",
+            "description": "Inspects system condition, CPU usage, RAM, GPU load, VRAM, and lists the top memory and resource-consuming processes.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "adjust_brightness",
+            "description": "Adjusts or sets the laptop display screen brightness percentage (0-100%).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Action: 'set', 'increase', or 'decrease'."
+                    },
+                    "value": {
+                        "type": "integer",
+                        "description": "Target brightness percentage (0-100) or amount to change."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "adjust_volume",
+            "description": "Adjusts or sets Windows master audio volume level percentage (0-100%) or toggles mute.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Action: 'set', 'increase', 'decrease', or 'mute'."
+                    },
+                    "value": {
+                        "type": "integer",
+                        "description": "Target volume percentage (0-100) or amount to change."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "system_control",
             "description": "Control system volume, media playback (play_pause, next_track, previous_track), or lock the screen.",
             "parameters": {
@@ -580,6 +649,14 @@ def dispatch_tool_call(name: str, args: Dict[str, Any], agent_ref: Optional[Any]
             return tools.organize_folder(args.get("folder_name", "downloads"))
         elif name == "take_screenshot":
             return tools.take_screenshot()
+        elif name == "open_last_screenshot":
+            return tools.open_last_screenshot()
+        elif name == "get_system_health":
+            return tools.get_system_health()
+        elif name == "adjust_brightness":
+            return tools.adjust_brightness(args.get("action", "set"), args.get("value"))
+        elif name == "adjust_volume":
+            return tools.adjust_volume(args.get("action", "set"), args.get("value"))
         elif name == "system_control":
             act = args.get("action", "")
             if act in ("volume_up", "volume_down", "mute"):
@@ -684,6 +761,11 @@ def clean_spoken_text(text: str) -> str:
             return f"{first_line}. Found {file_count} matching files, including {sample_str}. I have placed them on your screen."
         return f"I found {file_count} matching files and placed them on your screen."
 
+    # 0c. Strip accidental command-line / PowerShell / WMI snippets from spoken reply
+    s = re.sub(r'\(Get-[A-Za-z]+[\s\S]*?\)\.[A-Za-z0-9_]+', '', s)
+    s = re.sub(r'\(Get-[A-Za-z]+[^\)]*\)', '', s)
+    s = re.sub(r'^(?:Get-|Set-|Start-|Stop-|powershell|cmd\.exe|wmic|\$\w+)[\s\S]*?$', '', s, flags=re.MULTILINE)
+
     # 1. Clean markdown code blocks, backticks, bold, headers, list bullets
     s = re.sub(r'```[\s\S]*?```', '', s)
     s = re.sub(r'`([^`]+)`', r'\1', s)
@@ -757,6 +839,7 @@ class FastAgent:
             on_toggle_wake_word=self.set_wake_word_enabled,
             on_update_settings=self.on_update_settings,
             on_clear_history=self.clear_history_context,
+            on_test_transcribe=self._test_transcribe,
         )
 
         # 2. OpenWhispr Floating Voice Pill Overlay (attached to CTk root)
@@ -926,6 +1009,27 @@ class FastAgent:
             except Exception as e:
                 print(f"[Warning] Noise calibration error: {e}")
 
+    def _test_transcribe(self, raw_audio: bytes) -> str:
+        """Transcribes test audio bytes for the diagnostic panel."""
+        if not raw_audio:
+            return "[No audio captured]"
+        try:
+            samples = np.frombuffer(raw_audio, dtype=np.int16)
+            if self.stt is not None:
+                res = self.stt.transcribe(samples)
+                return res.strip() if res else "[Silence / No speech recognized]"
+            if self.whisper_model is not None:
+                import io, soundfile as sf
+                wav_io = io.BytesIO()
+                sf.write(wav_io, samples, 16000, format='WAV', subtype='PCM_16')
+                wav_io.seek(0)
+                segs, _ = self.whisper_model.transcribe(wav_io, language="en")
+                res = " ".join(s.text for s in segs).strip()
+                return res if res else "[Silence / No speech recognized]"
+            return "[Speech recognition engine not initialized]"
+        except Exception as e:
+            return f"[Transcription error: {e}]"
+
     def clear_history_context(self):
         """Resets active LLM conversation memory."""
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -949,8 +1053,11 @@ class FastAgent:
             self.input_device_name = new_mic
             self._init_mic_stream(self.input_device_name)
 
+        new_out = self.config.get("output_device_name", "Default (System Default)")
+        self.output_device_name = new_out
+
         save_config(self.config)
-        print(f"[Settings Updated] Mic='{getattr(self, 'input_device_name', 'Default')}' | FollowUp={self.follow_up_timeout}s | SilenceLimit={self.silence_limit}s | WakeWords={self.wake_words}")
+        print(f"[Settings Updated] Mic='{getattr(self, 'input_device_name', 'Default')}' | Out='{getattr(self, 'output_device_name', 'Default')}' | FollowUp={self.follow_up_timeout}s | SilenceLimit={self.silence_limit}s | WakeWords={self.wake_words}")
 
     def save_api_key(self, key: str):
         global OPENROUTER_API_KEY
@@ -1008,23 +1115,24 @@ class FastAgent:
             from PIL import Image, ImageDraw
 
             def create_tray_image():
-                icon_path = os.path.join(BASE_DIR, "jarvis_icon.png")
-                if os.path.exists(icon_path):
-                    try:
-                        return Image.open(icon_path)
-                    except Exception:
-                        pass
                 icon_ico = os.path.join(BASE_DIR, "jarvis_icon.ico")
                 if os.path.exists(icon_ico):
                     try:
                         return Image.open(icon_ico)
                     except Exception:
                         pass
+                icon_path = os.path.join(BASE_DIR, "jarvis_icon.png")
+                if os.path.exists(icon_path):
+                    try:
+                        return Image.open(icon_path)
+                    except Exception:
+                        pass
                 size = 64
                 img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
                 d = ImageDraw.Draw(img)
-                d.ellipse((4, 4, size - 4, size - 4), fill=(15, 23, 42, 255), outline=(56, 189, 248, 255), width=3)
-                d.ellipse((18, 18, size - 18, size - 18), fill=(37, 99, 235, 255), outline=(255, 255, 255, 255), width=2)
+                d.ellipse((2, 2, size - 2, size - 2), fill=(8, 14, 26, 255), outline=(56, 189, 248, 255), width=4)
+                d.ellipse((14, 14, size - 14, size - 14), outline=(37, 99, 235, 255), width=2)
+                d.rounded_rectangle((28, 18, 36, 46), radius=3, fill=(255, 255, 255, 255))
                 return img
 
             def on_open_dashboard(icon=None, item=None):
@@ -1361,7 +1469,33 @@ class FastAgent:
             self.pill.set_state("processing")
 
         prompt = f"[Voice Input]: {user_text}" if source == "voice" else f"[Typed Input]: {user_text}"
-        
+
+        # Fast System Agent Interceptor (Instant Sub-50ms Local Execution)
+        try:
+            handled, action_msg, response_speech, needs_llm = tools.detect_and_run_intent(clean_text)
+            if handled and not needs_llm:
+                t_tts = float(self.tts_speak(response_speech) or 0.0)
+                t_total = float(t_stt) + t_tts
+                try:
+                    self.dashboard.add_interaction(
+                        user_text=user_text,
+                        response=response_speech,
+                        source=source,
+                        tool=action_msg.split(":")[0].strip("[]") if action_msg else "fast_system_agent",
+                        latency={"total": round(t_total, 2), "stt": round(float(t_stt), 2), "llm": 0.0, "tool": 0.01, "tts": round(t_tts, 2)}
+                    )
+                except Exception as e:
+                    print(f"[Dashboard Update Error]: {e}")
+                self.history.append({"role": "user", "content": prompt})
+                self.history.append({"role": "assistant", "content": response_speech})
+                if self.pill:
+                    self.pill.set_state("idle")
+                return
+            elif handled and needs_llm:
+                prompt += f"\n\n[Active Screen Context]:\n{action_msg}"
+        except Exception as e_intent:
+            print(f"⚠️ [Fast System Agent Warning]: {e_intent}")
+
         # 1. LLM Generation
         t0_llm = time.time()
         content, tool_calls = self.query_llm(prompt)

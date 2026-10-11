@@ -62,20 +62,99 @@ def get_default_browser_exe():
         return ff, "Firefox"
     return None, "Default Browser"
 
-def _trigger_playback_after_delay():
-    time.sleep(2.0)
+def open_in_helium(url: str) -> bool:
+    """Opens a URL in Helium browser.
+    If Helium is running, brings it to foreground, creates a new tab (Ctrl+T), and pastes the clean URL.
+    If Helium is closed, launches the Helium process directly with the last active profile.
+    """
+    he = get_helium_exe()
+    if not he:
+        return False
+
+    user32 = ctypes.windll.user32
     try:
-        user32 = ctypes.windll.user32
-        KEYEVENTF_KEYUP = 0x0002
-        user32.keybd_event(ord('K'), 0, 0, 0)
-        user32.keybd_event(ord('K'), 0, KEYEVENTF_KEYUP, 0)
-        user32.keybd_event(0xB3, 0, 0, 0)
-        user32.keybd_event(0xB3, 0, KEYEVENTF_KEYUP, 0)
+        hdesk = user32.OpenDesktopW('Default', 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
     except Exception:
         pass
 
-def _schedule_autoplay_trigger():
-    threading.Thread(target=_trigger_playback_after_delay, daemon=True).start()
+    # Check for active Helium window
+    helium_hwnd = None
+    try:
+        import win32gui, win32con
+        def _enum_cb(h, _):
+            nonlocal helium_hwnd
+            if win32gui.IsWindowVisible(h):
+                title = win32gui.GetWindowText(h)
+                cls = win32gui.GetClassName(h)
+                if "Helium" in title and "Chrome" in cls:
+                    helium_hwnd = h
+            return True
+        win32gui.EnumWindows(_enum_cb, None)
+    except Exception:
+        pass
+
+    if helium_hwnd:
+        try:
+            import win32gui, win32con, win32clipboard
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(url, win32clipboard.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+
+            if win32gui.IsIconic(helium_hwnd):
+                win32gui.ShowWindow(helium_hwnd, win32con.SW_RESTORE)
+            user32.SetForegroundWindow(helium_hwnd)
+            time.sleep(0.12)
+
+            KEYEVENTF_KEYUP = 0x0002
+            VK_CONTROL = 0x11
+            VK_RETURN = 0x0D
+
+            def _combo(*vks):
+                for vk in vks:
+                    user32.keybd_event(vk, 0, 0, 0)
+                for vk in reversed(vks):
+                    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+            # Ctrl+T to open new tab
+            _combo(VK_CONTROL, ord('T'))
+            time.sleep(0.18)
+
+            # Ctrl+V to paste URL
+            _combo(VK_CONTROL, ord('V'))
+            time.sleep(0.08)
+
+            # Enter to navigate
+            _combo(VK_RETURN)
+            return True
+        except Exception as e:
+            print(f"[Notice] Helium hotkey navigation fallback: {e}")
+
+    # Fallback when Helium is not currently open
+    profile = "Profile 1"
+    local_state = os.path.expandvars(r"%LOCALAPPDATA%\imput\Helium\User Data\Local State")
+    if os.path.exists(local_state):
+        try:
+            with open(local_state, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                profile = data.get("profile", {}).get("last_used", "Profile 1")
+        except Exception:
+            pass
+
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0)
+    try:
+        subprocess.Popen([he, f'--profile-directory={profile}', url], creationflags=flags)
+        return True
+    except Exception:
+        try:
+            subprocess.Popen([he, url], creationflags=flags)
+            return True
+        except Exception:
+            return False
 
 def browser_control(action: str, tab_index: int = None, url: str = None) -> str:
     """Controls browser tabs, URL navigation, and media playback across Firefox, Chrome, and Edge."""
@@ -184,33 +263,24 @@ def play_video(query_or_target, browser=None):
 
     browser_lower = (browser or "").lower()
     if "helium" in browser_lower:
-        he = get_helium_exe()
-        if he:
-            subprocess.Popen([he, target_url])
-            _schedule_autoplay_trigger()
+        if open_in_helium(target_url):
             return f"Playing '{cleaned_query}' on YouTube in Helium."
     elif "firefox" in browser_lower:
         ff = get_firefox_exe()
         if ff:
             subprocess.Popen([ff, target_url])
-            _schedule_autoplay_trigger()
             return f"Playing '{cleaned_query}' on YouTube in Firefox."
     elif "chrome" in browser_lower:
         ch = get_chrome_exe()
         if ch:
             subprocess.Popen([ch, target_url])
-            _schedule_autoplay_trigger()
             return f"Playing '{cleaned_query}' on YouTube in Chrome."
     else:
         # User default browser: Helium
-        he = get_helium_exe()
-        if he:
-            subprocess.Popen([he, target_url])
-            _schedule_autoplay_trigger()
+        if open_in_helium(target_url):
             return f"Playing '{cleaned_query}' on YouTube in Helium."
 
     webbrowser.open(target_url)
-    _schedule_autoplay_trigger()
     return f"Playing '{cleaned_query}' on YouTube."
 
 
@@ -262,9 +332,7 @@ def open_url(url_or_target, browser=None):
     friendly_name = get_friendly_site_name(url, url_or_target)
     browser_lower = (browser or "").lower()
     if "helium" in browser_lower:
-        he = get_helium_exe()
-        if he:
-            subprocess.Popen([he, url])
+        if open_in_helium(url):
             return f"Opened {friendly_name} in Helium."
     elif "firefox" in browser_lower:
         ff = get_firefox_exe()
@@ -278,9 +346,7 @@ def open_url(url_or_target, browser=None):
             return f"Opened {friendly_name} in Chrome."
     else:
         # User default browser: Helium
-        he = get_helium_exe()
-        if he:
-            subprocess.Popen([he, url])
+        if open_in_helium(url):
             return f"Opened {friendly_name} in Helium."
 
     webbrowser.open(url)
@@ -781,20 +847,53 @@ def adjust_brightness(action="increase", value=None):
     except Exception as e:
         return f"Failed to adjust brightness: {e}"
 
-def adjust_volume(action="increase"):
-    """Controls Windows master volume using native user32 keystrokes."""
+def adjust_volume(action="increase", value=None):
+    """Controls Windows master volume using pycaw with fallback to user32 keystrokes."""
     import ctypes
-    if "up" in action or "inc" in action or "more" in action:
+
+    # Try pycaw first for accurate percentage and scalar volume setting
+    try:
+        from pycaw.pycaw import AudioUtilities
+        devices = AudioUtilities.GetSpeakers()
+        endpoint = devices.EndpointVolume
+
+        if (action == "set" or str(action).isdigit()) or value is not None:
+            target = int(value) if value is not None else int(action)
+            target = max(0, min(100, target))
+            endpoint.SetMasterVolumeLevelScalar(target / 100.0, None)
+            return f"Volume set to {target}%."
+        elif "mute" in str(action).lower():
+            is_muted = endpoint.GetMute()
+            endpoint.SetMute(not is_muted, None)
+            return "Volume muted." if not is_muted else "Volume unmuted."
+        elif "up" in str(action) or "inc" in str(action) or "more" in str(action):
+            step = (int(value) / 100.0) if value else 0.10
+            curr = endpoint.GetMasterVolumeLevelScalar()
+            new_vol = min(1.0, curr + step)
+            endpoint.SetMasterVolumeLevelScalar(new_vol, None)
+            return f"Volume increased to {int(round(new_vol * 100))}%."
+        elif "down" in str(action) or "dec" in str(action) or "less" in str(action):
+            step = (int(value) / 100.0) if value else 0.10
+            curr = endpoint.GetMasterVolumeLevelScalar()
+            new_vol = max(0.0, curr - step)
+            endpoint.SetMasterVolumeLevelScalar(new_vol, None)
+            return f"Volume decreased to {int(round(new_vol * 100))}%."
+    except Exception:
+        pass
+
+    # Keystroke fallback
+    act_str = str(action).lower()
+    if "up" in act_str or "inc" in act_str or "more" in act_str:
         for _ in range(5):
             ctypes.windll.user32.keybd_event(0xAF, 0, 0, 0)
             ctypes.windll.user32.keybd_event(0xAF, 0, 2, 0)
         return "Volume increased."
-    elif "down" in action or "dec" in action or "less" in action:
+    elif "down" in act_str or "dec" in act_str or "less" in act_str:
         for _ in range(5):
             ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)
             ctypes.windll.user32.keybd_event(0xAE, 0, 2, 0)
         return "Volume decreased."
-    elif "mute" in action or "unmute" in action:
+    elif "mute" in act_str:
         ctypes.windll.user32.keybd_event(0xAD, 0, 0, 0)
         ctypes.windll.user32.keybd_event(0xAD, 0, 2, 0)
         return "Volume mute toggled."
@@ -864,29 +963,6 @@ def get_installed_games():
         return ["Counter-Strike 2", "Roblox", "Forza Horizon 6"]
     return game_list
 
-def open_folder(folder_path=""):
-    """Opens a folder in Windows File Explorer."""
-    path_str = (folder_path or "").strip().strip("'\"").lower()
-    user_home = os.path.expanduser("~")
-    
-    if "download" in path_str:
-        p = os.path.join(user_home, "Downloads")
-    elif "picture" in path_str:
-        p = os.path.join(user_home, "Pictures")
-    elif "document" in path_str:
-        p = os.path.join(user_home, "Documents")
-    elif "desktop" in path_str:
-        p = os.path.join(user_home, "Desktop")
-    elif folder_path and folder_path.strip():
-        p = os.path.expanduser(folder_path.strip().strip("'\""))
-    else:
-        p = user_home
-
-    if not os.path.exists(p):
-        return f"Folder does not exist: {p}"
-    subprocess.Popen(["explorer.exe", os.path.normpath(p)])
-    return f"Opened folder: {p}"
-
 def move_item(source_path, dest_path):
     """Moves a file or folder from source to destination."""
     src = os.path.expanduser(source_path.strip().strip("'\""))
@@ -900,10 +976,12 @@ def move_item(source_path, dest_path):
         return f"Failed to move item: {e}"
 
 def resolve_folder_path(folder_name=""):
-    """Resolves friendly folder names like 'downloads', 'desktop' or absolute paths."""
+    """Resolves friendly folder names like 'work', 'downloads', 'desktop' or absolute paths."""
     raw = (folder_name or "").strip().strip("'\"").lower()
     user_home = os.path.expanduser("~")
-    if "download" in raw or not raw:
+
+    # 1. Direct standard aliases
+    if "download" in raw:
         return os.path.join(user_home, "Downloads"), "Downloads"
     elif "desktop" in raw:
         return os.path.join(user_home, "Desktop"), "Desktop"
@@ -911,17 +989,156 @@ def resolve_folder_path(folder_name=""):
         return os.path.join(user_home, "Documents"), "Documents"
     elif "picture" in raw or "photo" in raw:
         return os.path.join(user_home, "Pictures"), "Pictures"
+    elif "screenshot" in raw:
+        ss_dir = os.path.join(user_home, "Pictures", "Screenshots")
+        return (ss_dir if os.path.exists(ss_dir) else os.path.join(user_home, "Pictures")), "Screenshots"
     elif "music" in raw:
         return os.path.join(user_home, "Music"), "Music"
     elif "video" in raw:
         return os.path.join(user_home, "Videos"), "Videos"
-    elif "project" in raw or "code" in raw or "repo" in raw:
+    elif "project" in raw or "repo" in raw:
         return os.getcwd(), "Current Project"
-    elif folder_name and os.path.exists(os.path.expanduser(folder_name.strip("'\""))):
+
+    # 2. Work / Workspace folder smart resolution (C:\work, D:\work, ~/work, etc.)
+    if any(k in raw for k in ["work", "workspace"]):
+        work_candidates = [
+            r"C:\work",
+            r"D:\work",
+            os.path.join(user_home, "work"),
+            os.path.join(user_home, "workspace"),
+            r"C:\workspace",
+            os.path.join(user_home, "Desktop", "work"),
+            os.path.join(user_home, "Downloads", "work"),
+            os.getcwd()
+        ]
+        for candidate in work_candidates:
+            if os.path.exists(candidate):
+                return candidate, "Work"
+
+    # 3. Direct absolute or user path
+    if folder_name:
         p = os.path.expanduser(folder_name.strip("'\""))
-        return p, os.path.basename(p) or p
-    else:
-        return os.path.join(user_home, "Downloads"), "Downloads"
+        if os.path.exists(p):
+            return p, os.path.basename(p) or p
+
+    # 4. Search top-level user directories or root drives for a matching folder name
+    clean_target = re.sub(r'\b(folder|dir|directory)\b', '', raw).strip()
+    if clean_target:
+        for base in [r"C:\\", r"D:\\", user_home, os.path.join(user_home, "Desktop"), os.path.join(user_home, "Downloads")]:
+            if os.path.exists(base):
+                try:
+                    for entry in os.listdir(base):
+                        if entry.lower() == clean_target and os.path.isdir(os.path.join(base, entry)):
+                            p = os.path.join(base, entry)
+                            return p, entry
+                except Exception:
+                    pass
+
+    return os.path.join(user_home, "Downloads"), "Downloads"
+
+def open_folder(folder_path=""):
+    """Opens a folder in Windows File Explorer with intelligent resolution."""
+    p, display_name = resolve_folder_path(folder_path)
+    if not os.path.exists(p):
+        return f"Folder does not exist: {p}"
+    subprocess.Popen(["explorer.exe", os.path.normpath(p)])
+    return f"Opened {display_name} folder ({p})."
+
+def open_last_screenshot():
+    """Finds and opens the most recent screenshot taken on the computer."""
+    user_home = os.path.expanduser("~")
+    search_dirs = [
+        os.path.join(user_home, "Pictures", "Screenshots"),
+        os.path.join(user_home, "Pictures"),
+        os.path.join(user_home, "Desktop")
+    ]
+    candidates = []
+    for d in search_dirs:
+        if os.path.exists(d):
+            try:
+                for f in os.listdir(d):
+                    if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.webp')):
+                        fp = os.path.join(d, f)
+                        try:
+                            candidates.append((fp, os.path.getmtime(fp)))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    if not candidates:
+        return "No recent screenshots found in Pictures or Desktop."
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    latest_file = candidates[0][0]
+    try:
+        os.startfile(latest_file)
+        return f"Opened latest screenshot: {os.path.basename(latest_file)}."
+    except Exception as e:
+        return f"Found screenshot {latest_file} but failed to open: {e}"
+
+def get_system_health():
+    """
+    Hardware Telemetry & Top Resource Monitor:
+    Returns CPU, RAM, GPU, VRAM and top resource-consuming processes.
+    """
+    import psutil
+    cpu_pct = int(psutil.cpu_percent(interval=0.1))
+    mem = psutil.virtual_memory()
+    ram_pct = int(mem.percent)
+    ram_used_gb = mem.used / (1024 ** 3)
+    ram_total_gb = mem.total / (1024 ** 3)
+
+    gpu_str = ""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        gpu_name = pynvml.nvmlDeviceGetName(handle)
+        if isinstance(gpu_name, bytes):
+            gpu_name = gpu_name.decode("utf-8")
+        gpu_util = int(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+        vram = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        vram_used_gb = vram.used / (1024 ** 3)
+        vram_total_gb = vram.total / (1024 ** 3)
+        gpu_str = f"GPU is at {gpu_util}% ({vram_used_gb:.1f} of {vram_total_gb:.1f} GB VRAM). "
+    except Exception:
+        pass
+
+    # Aggregate processes by executable name
+    proc_map = {}
+    for p in psutil.process_iter(['name', 'memory_info']):
+        try:
+            info = p.info
+            name = (info.get('name') or '').strip()
+            if not name or name.lower() in ('system idle process', 'system', 'registry', 'memcompression'):
+                continue
+            mem_mb = (info['memory_info'].rss if info.get('memory_info') else 0) / (1024 * 1024)
+            if mem_mb > 30:
+                stem = name.replace('.exe', '').lower()
+                if stem in proc_map:
+                    proc_map[stem]['mem'] += mem_mb
+                    proc_map[stem]['count'] += 1
+                else:
+                    proc_map[stem] = {'mem': mem_mb, 'count': 1, 'name': name.replace('.exe', '')}
+        except Exception:
+            continue
+
+    sorted_procs = sorted(proc_map.values(), key=lambda x: x['mem'], reverse=True)
+    top_items = []
+    for p in sorted_procs[:3]:
+        if p['count'] > 1:
+            top_items.append(f"{p['name']} ({int(p['mem'])} MB across {p['count']} instances)")
+        else:
+            top_items.append(f"{p['name']} ({int(p['mem'])} MB)")
+
+    top_str = ", ".join(top_items) if top_items else "no heavy processes"
+    speech = (
+        f"CPU is at {cpu_pct}%, RAM is at {ram_pct}% ({ram_used_gb:.1f} of {ram_total_gb:.1f} GB). "
+        f"{gpu_str}Top apps consuming the most memory are {top_str}. "
+        f"Say 'end' followed by the app name if you want me to terminate any of them."
+    )
+    return speech
 
 def create_folder(folder_path=""):
     """Creates a new folder or directory."""
@@ -1160,7 +1377,9 @@ AVAILABLE_TOOLS = {
     "read_file_content": read_file_content,
     "move_item": move_item,
     "run_command": execute_command,
-    "browser_control": browser_control
+    "browser_control": browser_control,
+    "open_last_screenshot": open_last_screenshot,
+    "get_system_health": get_system_health
 }
 
 def parse_and_execute_tool(text):
@@ -1260,9 +1479,14 @@ def detect_and_run_intent(text):
         res = adjust_brightness(action, val)
         return True, f"[Action: {res}]", res, False
 
-    # 4. Volume Control ("Increase the volume", "mute")
+    # 4. Volume Control ("Increase the volume", "mute", "set volume to 50", "sound to 50")
     if "volume" in t or "sound" in t:
-        if any(w in t for w in ["increase", "up", "more", "raise", "loud", "louder"]):
+        m = re.search(r'(\d+)', t)
+        if m and any(w in t for w in ["set", "to", "at", "%", "sound"]):
+            val = int(m.group(1))
+            res = adjust_volume("set", val)
+            return True, f"[Action: {res}]", f"Set volume to {val} percent for you.", False
+        elif any(w in t for w in ["increase", "up", "more", "raise", "loud", "louder"]):
             res = adjust_volume("increase")
             return True, f"[Action: {res}]", "Increased volume for you.", False
         elif any(w in t for w in ["decrease", "down", "lower", "less", "quiet", "softer"]):
@@ -1400,17 +1624,42 @@ def detect_and_run_intent(text):
         res = open_url("https://github.com", browser=browser)
         return True, f"[Action: {res}]", "Opening GitHub for you.", False
 
-    # 12. Screenshot Intent
+    # 12. Screenshot Intents (open latest vs take new)
+    if any(w in t for w in ["last screenshot", "latest screenshot", "recent screenshot", "previous screenshot"]):
+        res = open_last_screenshot()
+        return True, f"[Action: {res}]", res, False
+
     if "screenshot" in t and any(w in t for w in ["take", "capture", "grab", "save"]):
         res = take_screenshot()
         return True, f"[Action: {res}]", "Screenshot taken and saved to your Pictures folder.", False
 
-    # 13. Folder Intent ("open downloads", "open pictures", "open folder C:/...")
-    if "open" in t and any(w in t for w in ["folder", "downloads", "pictures", "desktop", "documents"]):
-        m = re.search(r'open\s+(?:folder\s+)?([a-zA-Z0-9_:\\/-]+)', t)
+    # 13. System Health & Resource Telemetry ("system condition", "cpu and gpu", "top processes")
+    if any(p in t for p in [
+        "system condition", "system status", "system health", "cpu and gpu", "cpu usage", "gpu usage",
+        "memory usage", "ram usage", "resource usage", "processes taking", "systems are talking most",
+        "talking most", "systems are taking most", "what is taking most memory", "top processes",
+        "task manager", "system performance", "hardware telemetry", "how is my pc doing"
+    ]):
+        res = get_system_health()
+        return True, f"[Action: System Telemetry Checked]\n{res}", res, False
+
+    # 13b. Terminate / End Process Intent ("end chrome", "kill python", "close blender")
+    if any(t.startswith(prefix) for prefix in ["end ", "kill ", "terminate "]):
+        m = re.search(r'^(?:end|kill|terminate)\s+(?:process\s+|app\s+|application\s+)?([a-zA-Z0-9_.\s]+)', t)
+        if m:
+            proc_target = m.group(1).strip().strip("'\".,?! ")
+            if proc_target not in ("all", "it", "this", "that"):
+                res = close_app(proc_target)
+                return True, f"[Action: {res}]", res, False
+
+    # 13c. Folder Intent ("open work folder", "open downloads", "open pictures", "open folder C:/...")
+    if ("open" in t or "show" in t or "explore" in t) and any(w in t for w in ["folder", "downloads", "pictures", "desktop", "documents", "work", "workspace"]):
+        m = re.search(r'(?:open|show|explore)\s+(?:my\s+)?(?:folder\s+)?([a-zA-Z0-9_:\\/-]+)(?:\s+folder)?', t)
         folder = m.group(1).strip() if m else ""
+        if folder in ("my", "the", "a"):
+            folder = "work" if "work" in t else "downloads"
         res = open_folder(folder)
-        return True, f"[Action: {res}]", "Opened folder in File Explorer for you.", False
+        return True, f"[Action: {res}]", f"Opening {folder.capitalize()} folder for you.", False
 
     # 14. Terminal CLI Command Intent ("run command ipconfig", "run dir")
     if t.startswith("run command ") or t.startswith("execute command ") or t.startswith("run cli "):

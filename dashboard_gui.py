@@ -108,6 +108,71 @@ def get_audio_input_devices() -> List[str]:
     return devices
 
 
+def get_audio_output_devices() -> List[str]:
+    """Returns clean, deduplicated list of available speaker/headphone output devices."""
+    devices = ["Default (System Default)"]
+    try:
+        import pyaudio
+        p = pyaudio.PyAudio()
+        try:
+            seen = set()
+            try:
+                mme = p.get_host_api_info_by_index(0)
+                for dev_idx in range(mme.get('deviceCount', 0)):
+                    info = p.get_device_info_by_host_api_device_index(0, dev_idx)
+                    if info.get('maxOutputChannels', 0) > 0:
+                        name = info.get('name', '').strip()
+                        if name and name not in seen and not any(k in name.lower() for k in ['mapper', 'primary sound']):
+                            seen.add(name)
+                            devices.append(name)
+            except Exception:
+                pass
+            if len(devices) == 1:
+                for i in range(p.get_device_count()):
+                    try:
+                        info = p.get_device_info_by_index(i)
+                        if info.get('maxOutputChannels', 0) > 0:
+                            name = info.get('name', '').strip()
+                            if name and name not in seen and not any(k in name.lower() for k in ['mapper', 'primary sound']):
+                                seen.add(name)
+                                devices.append(name)
+                    except Exception:
+                        continue
+        finally:
+            p.terminate()
+    except Exception:
+        pass
+    return devices
+
+
+def find_audio_device_index(p, device_name: Optional[str], is_input: bool = True) -> Optional[int]:
+    """Resolves PyAudio device index from a friendly device name."""
+    if not device_name or device_name.startswith("Default") or device_name.lower() == "default":
+        return None
+    ch_key = 'maxInputChannels' if is_input else 'maxOutputChannels'
+    try:
+        mme = p.get_host_api_info_by_index(0)
+        for dev_idx in range(mme.get('deviceCount', 0)):
+            info = p.get_device_info_by_host_api_device_index(0, dev_idx)
+            if info.get(ch_key, 0) > 0:
+                name = info.get('name', '').strip()
+                if name.lower() == device_name.lower() or name.lower().startswith(device_name.lower()[:20]):
+                    return info.get('index')
+    except Exception:
+        pass
+    target = device_name.lower()
+    for i in range(p.get_device_count()):
+        try:
+            info = p.get_device_info_by_index(i)
+            if info.get(ch_key, 0) > 0:
+                name = info.get('name', '').strip().lower()
+                if target in name or name in target:
+                    return i
+        except Exception:
+            continue
+    return None
+
+
 DEFAULT_CONFIG = {
     "follow_up_timeout": 8.0,
     "silence_limit": 1.2,
@@ -116,6 +181,7 @@ DEFAULT_CONFIG = {
     "wake_word_enabled": True,
     "wake_words": ["hey jarvis", "jarvis"],
     "input_device_name": "Default (System Default)",
+    "output_device_name": "Default (System Default)",
 }
 
 
@@ -148,6 +214,7 @@ class JarvisDashboard:
         on_toggle_wake_word: Optional[Callable[[bool], None]] = None,
         on_update_settings: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_clear_history: Optional[Callable[[], None]] = None,
+        on_test_transcribe: Optional[Callable[[bytes], str]] = None,
     ):
         self.on_trigger_voice = on_trigger_voice
         self.on_send_chat = on_send_chat
@@ -156,11 +223,17 @@ class JarvisDashboard:
         self.on_toggle_wake_word = on_toggle_wake_word
         self.on_update_settings = on_update_settings
         self.on_clear_history = on_clear_history
+        self.on_test_transcribe = on_test_transcribe
 
         self.config = load_config()
         self.history = load_history()
         self.current_view = "home"
         self._is_recording = False
+
+        # Audio Diagnostic State
+        self.is_mic_testing = False
+        self.is_playing_test_audio = False
+        self.test_recorded_audio = b""
 
         # Main Root Window
         self.root = ctk.CTk()
@@ -437,7 +510,7 @@ class JarvisDashboard:
                 if name == "memory":
                     self.refresh_memory_view()
                 elif name == "settings":
-                    self._refresh_mic_list()
+                    self._refresh_audio_device_lists()
             else:
                 frame.grid_forget()
 
@@ -1138,11 +1211,12 @@ class JarvisDashboard:
             corner_radius=10
         )
         self.views["settings"] = settings_frame
-        # Section 1: Microphone & Audio Input Device
-        s_mic = self._create_settings_section(settings_frame, "Microphone & Audio Input Device")
+        # Section 1: Audio Devices & Sound Quality Diagnostic
+        s_audio = self._create_settings_section(settings_frame, "Audio Devices & Sound Quality Diagnostic")
 
-        row_mic = ctk.CTkFrame(s_mic, fg_color="transparent")
-        row_mic.pack(fill="x", padx=14, pady=(8, 4))
+        # Row 1: Input Microphone
+        row_mic = ctk.CTkFrame(s_audio, fg_color="transparent")
+        row_mic.pack(fill="x", padx=14, pady=(8, 3))
         ctk.CTkLabel(
             row_mic,
             text="Input Microphone:",
@@ -1169,29 +1243,157 @@ class JarvisDashboard:
         self.mic_option_menu.set(current_mic)
         self.mic_option_menu.pack(side="right")
 
-        row_mic_sub = ctk.CTkFrame(s_mic, fg_color="transparent")
-        row_mic_sub.pack(fill="x", padx=14, pady=(2, 8))
+        # Row 2: Output Speakers / Headphones
+        row_out = ctk.CTkFrame(s_audio, fg_color="transparent")
+        row_out.pack(fill="x", padx=14, pady=(4, 3))
+        ctk.CTkLabel(
+            row_out,
+            text="Output Device (Playback):",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#f8fafc"
+        ).pack(side="left")
 
-        short_mic = (current_mic[:35] + "..") if len(current_mic) > 35 else current_mic
-        self.mic_status_label = ctk.CTkLabel(
-            row_mic_sub,
-            text=f"Selected: {short_mic}",
+        current_out = self.config.get("output_device_name", "Default (System Default)")
+        available_outs = get_audio_output_devices()
+        if current_out not in available_outs:
+            available_outs.insert(0, current_out)
+
+        self.output_option_menu = ctk.CTkOptionMenu(
+            row_out,
+            values=available_outs,
+            command=self._on_output_device_change,
+            fg_color="#1e293b",
+            button_color="#2563eb",
+            button_hover_color="#1d4ed8",
+            dropdown_fg_color="#0f172a",
+            width=280,
+            height=28
+        )
+        self.output_option_menu.set(current_out)
+        self.output_option_menu.pack(side="right")
+
+        # Row 3: Status & Refresh devices button
+        row_dev_sub = ctk.CTkFrame(s_audio, fg_color="transparent")
+        row_dev_sub.pack(fill="x", padx=14, pady=(2, 8))
+
+        short_mic = (current_mic[:28] + "..") if len(current_mic) > 28 else current_mic
+        short_out = (current_out[:28] + "..") if len(current_out) > 28 else current_out
+        self.audio_status_label = ctk.CTkLabel(
+            row_dev_sub,
+            text=f"Mic: {short_mic}  |  Out: {short_out}",
             font=ctk.CTkFont(size=10),
             text_color="#64748b"
         )
-        self.mic_status_label.pack(side="left")
+        self.audio_status_label.pack(side="left")
 
-        self.refresh_mic_btn = ctk.CTkButton(
-            row_mic_sub,
-            text="🔄 Refresh Mics",
-            width=90,
+        self.refresh_audio_btn = ctk.CTkButton(
+            row_dev_sub,
+            text="🔄 Refresh Devices",
+            width=120,
             height=24,
             font=ctk.CTkFont(size=11),
             fg_color="#1e293b",
             hover_color="#334155",
-            command=self._refresh_mic_list
+            command=self._refresh_audio_device_lists
         )
-        self.refresh_mic_btn.pack(side="right")
+        self.refresh_audio_btn.pack(side="right")
+
+        # Sub-Card: Live Microphone & Sound Quality Diagnostic
+        diag_card = ctk.CTkFrame(
+            s_audio,
+            fg_color="#090d16",
+            border_width=1,
+            border_color="#1e293b",
+            corner_radius=8
+        )
+        diag_card.pack(fill="x", padx=14, pady=(4, 10))
+
+        diag_hdr = ctk.CTkFrame(diag_card, fg_color="transparent")
+        diag_hdr.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(
+            diag_hdr,
+            text="🎙️ Microphone Test & Sound Quality Inspector",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#38bdf8"
+        ).pack(side="left")
+
+        # Action Buttons Row
+        diag_btns = ctk.CTkFrame(diag_card, fg_color="transparent")
+        diag_btns.pack(fill="x", padx=12, pady=(4, 6))
+
+        self.test_mic_btn = ctk.CTkButton(
+            diag_btns,
+            text="🎙️ Test Mic (5s)",
+            width=125,
+            height=28,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            command=self._start_mic_test
+        )
+        self.test_mic_btn.pack(side="left", padx=(0, 8))
+
+        self.play_test_btn = ctk.CTkButton(
+            diag_btns,
+            text="▶️ Play Recording",
+            width=135,
+            height=28,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#059669",
+            hover_color="#047857",
+            state="disabled",
+            command=self._play_test_audio
+        )
+        self.play_test_btn.pack(side="left", padx=(0, 8))
+
+        self.stop_test_btn = ctk.CTkButton(
+            diag_btns,
+            text="⏹️ Stop",
+            width=70,
+            height=28,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#dc2626",
+            hover_color="#b91c1c",
+            state="disabled",
+            command=self._stop_test_actions
+        )
+        self.stop_test_btn.pack(side="left")
+
+        # Live VU Meter & Audio Level Progress Bar
+        vu_box = ctk.CTkFrame(diag_card, fg_color="transparent")
+        vu_box.pack(fill="x", padx=12, pady=(2, 4))
+
+        self.vu_bar = ctk.CTkProgressBar(
+            vu_box,
+            height=8,
+            fg_color="#1e293b",
+            progress_color="#38bdf8"
+        )
+        self.vu_bar.set(0.0)
+        self.vu_bar.pack(fill="x", pady=(2, 4))
+
+        self.vu_text = ctk.CTkLabel(
+            vu_box,
+            text="Volume: 0%  |  Status: Ready to test",
+            font=ctk.CTkFont(size=10),
+            text_color="#94a3b8"
+        )
+        self.vu_text.pack(anchor="w")
+
+        # Diagnostic Details & Transcription Result Box
+        self.diag_result_box = ctk.CTkFrame(diag_card, fg_color="#0b1120", corner_radius=6, border_width=1, border_color="#1e293b")
+        self.diag_result_box.pack(fill="x", padx=12, pady=(4, 10))
+
+        self.diag_result_label = ctk.CTkLabel(
+            self.diag_result_box,
+            text="Ready. Click 'Test Mic (5s)' and speak normally to check if Jarvis hears you.",
+            font=ctk.CTkFont(size=11),
+            text_color="#94a3b8",
+            justify="left",
+            anchor="w",
+            wraplength=640
+        )
+        self.diag_result_label.pack(fill="x", padx=10, pady=8)
 
         # Section 2: Voice Session & Follow-Up Listening
         s1 = self._create_settings_section(settings_frame, "Voice Conversation & Listening Window")
@@ -1469,23 +1671,261 @@ class JarvisDashboard:
     def _on_mic_device_change(self, choice: str):
         self.config["input_device_name"] = choice
         save_config(self.config)
-        if hasattr(self, "mic_status_label"):
-            short_choice = (choice[:35] + "..") if len(choice) > 35 else choice
-            self.mic_status_label.configure(text=f"Selected: {short_choice}")
+        self._update_audio_status_label()
         if self.on_update_settings:
             self.on_update_settings(self.config)
 
-    def _refresh_mic_list(self):
-        new_devs = get_audio_input_devices()
-        curr = self.config.get("input_device_name", "Default (System Default)")
-        if curr not in new_devs:
-            new_devs.insert(0, curr)
+    def _on_output_device_change(self, choice: str):
+        self.config["output_device_name"] = choice
+        save_config(self.config)
+        self._update_audio_status_label()
+        if self.on_update_settings:
+            self.on_update_settings(self.config)
+
+    def _update_audio_status_label(self):
+        if hasattr(self, "audio_status_label"):
+            m = self.config.get("input_device_name", "Default")
+            o = self.config.get("output_device_name", "Default")
+            sm = (m[:28] + "..") if len(m) > 28 else m
+            so = (o[:28] + "..") if len(o) > 28 else o
+            self.audio_status_label.configure(text=f"Mic: {sm}  |  Out: {so}")
+
+    def _refresh_audio_device_lists(self):
+        new_mics = get_audio_input_devices()
+        curr_mic = self.config.get("input_device_name", "Default (System Default)")
+        if curr_mic not in new_mics:
+            new_mics.insert(0, curr_mic)
         if hasattr(self, "mic_option_menu"):
-            self.mic_option_menu.configure(values=new_devs)
-            self.mic_option_menu.set(curr)
-        if hasattr(self, "mic_status_label"):
-            short_curr = (curr[:35] + "..") if len(curr) > 35 else curr
-            self.mic_status_label.configure(text=f"Selected: {short_curr}")
+            self.mic_option_menu.configure(values=new_mics)
+            self.mic_option_menu.set(curr_mic)
+
+        new_outs = get_audio_output_devices()
+        curr_out = self.config.get("output_device_name", "Default (System Default)")
+        if curr_out not in new_outs:
+            new_outs.insert(0, curr_out)
+        if hasattr(self, "output_option_menu"):
+            self.output_option_menu.configure(values=new_outs)
+            self.output_option_menu.set(curr_out)
+
+        self._update_audio_status_label()
+
+    def _start_mic_test(self):
+        """Starts 5-second microphone recording test in a background thread."""
+        if self.is_mic_testing or self.is_playing_test_audio:
+            return
+        self.is_mic_testing = True
+        self.test_mic_btn.configure(state="disabled")
+        self.play_test_btn.configure(state="disabled")
+        self.stop_test_btn.configure(state="normal")
+        self.vu_bar.set(0.0)
+        self.vu_text.configure(text="Recording: 0% volume  |  Remaining: 5.0s", text_color="#38bdf8")
+        self.diag_result_label.configure(
+            text="🎙️ Recording in progress... Speak naturally into your microphone now (5 seconds)...",
+            text_color="#f8fafc"
+        )
+        threading.Thread(target=self._run_mic_test_thread, daemon=True).start()
+
+    def _run_mic_test_thread(self):
+        import numpy as np
+        import pyaudio
+
+        p = None
+        stream = None
+        frames = []
+        max_rms = 0.0
+        sum_rms = 0.0
+        count = 0
+        mic_name = self.config.get("input_device_name", "Default (System Default)")
+
+        try:
+            p = pyaudio.PyAudio()
+            dev_idx = find_audio_device_index(p, mic_name, is_input=True)
+            kwargs = {
+                "format": pyaudio.paInt16,
+                "channels": 1,
+                "rate": 16000,
+                "input": True,
+                "frames_per_buffer": 1024
+            }
+            if dev_idx is not None:
+                kwargs["input_device_index"] = dev_idx
+
+            try:
+                stream = p.open(**kwargs)
+            except Exception:
+                kwargs.pop("input_device_index", None)
+                stream = p.open(**kwargs)
+
+            start_t = time.time()
+            duration = 5.0
+
+            while self.is_mic_testing and (time.time() - start_t < duration):
+                data = stream.read(1024, exception_on_overflow=False)
+                frames.append(data)
+                arr = np.frombuffer(data, dtype=np.int16)
+                rms = float(np.abs(arr).mean())
+                max_rms = max(max_rms, rms)
+                sum_rms += rms
+                count += 1
+                norm_val = min(1.0, rms / 2000.0)
+                rem_t = max(0.0, duration - (time.time() - start_t))
+                self.root.after(0, self._update_test_vu, norm_val, rms, rem_t)
+                time.sleep(0.01)
+
+        except Exception as e:
+            self.root.after(0, self._on_test_error, f"Microphone error: {e}")
+            return
+        finally:
+            if stream:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+            if p:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+
+        if not self.is_mic_testing:
+            return
+
+        avg_rms = sum_rms / max(1, count)
+        raw_audio = b"".join(frames)
+        self.test_recorded_audio = raw_audio
+
+        # Signal health assessment
+        if max_rms < 120:
+            health = "⚠️ Very Low / Silent: Minimal audio received. Check if microphone is muted or pick another input device."
+            h_color = "#ef4444"
+        elif max_rms < 500:
+            health = "🟡 Quiet Signal: Voice was heard but volume is low. Try speaking closer to the microphone."
+            h_color = "#f59e0b"
+        elif max_rms > 5000:
+            health = "⚠️ Very Loud / Clipping: Signal is extremely high and may clip or distort."
+            h_color = "#f59e0b"
+        else:
+            health = "🟢 Clear Signal: Optimal volume and clarity for speech recognition."
+            h_color = "#10b981"
+
+        # Transcribe what was heard
+        heard_text = ""
+        if self.on_test_transcribe and raw_audio:
+            try:
+                heard_text = self.on_test_transcribe(raw_audio)
+            except Exception as e:
+                heard_text = f"[Transcription error: {e}]"
+        if not heard_text:
+            heard_text = "[No speech detected]"
+
+        self.root.after(0, self._finish_mic_test, max_rms, avg_rms, health, h_color, heard_text)
+
+    def _update_test_vu(self, norm: float, rms: float, rem: float):
+        if hasattr(self, "vu_bar"):
+            self.vu_bar.set(norm)
+        if hasattr(self, "vu_text"):
+            pct = int(norm * 100)
+            self.vu_text.configure(text=f"Recording: {pct}% level ({int(rms)} RMS)  |  Time left: {rem:.1f}s")
+
+    def _on_test_error(self, err_msg: str):
+        self.is_mic_testing = False
+        self.test_mic_btn.configure(state="normal")
+        self.stop_test_btn.configure(state="disabled")
+        self.vu_bar.set(0.0)
+        self.diag_result_label.configure(text=f"❌ {err_msg}", text_color="#ef4444")
+
+    def _finish_mic_test(self, peak_rms: float, avg_rms: float, health: str, h_color: str, heard_text: str):
+        self.is_mic_testing = False
+        self.test_mic_btn.configure(state="normal")
+        self.play_test_btn.configure(state="normal" if self.test_recorded_audio else "disabled")
+        self.stop_test_btn.configure(state="disabled")
+        self.vu_bar.set(0.0)
+
+        out_name = self.config.get("output_device_name", "Default")
+        report = (
+            f"• Signal Quality: {health}\n"
+            f"• Audio Levels: Peak {int(peak_rms)} RMS  |  Average {int(avg_rms)} RMS\n"
+            f"• What Jarvis Heard: \"{heard_text}\"\n\n"
+            f"👉 Click '▶️ Play Recording' to listen back through '{out_name}'."
+        )
+        self.diag_result_label.configure(text=report, text_color="#f8fafc")
+        self.vu_text.configure(text="Status: Test complete. Ready for playback or re-test.", text_color="#94a3b8")
+
+    def _play_test_audio(self):
+        """Plays recorded test audio buffer through the selected output device."""
+        if not self.test_recorded_audio or self.is_playing_test_audio or self.is_mic_testing:
+            return
+        self.is_playing_test_audio = True
+        self.test_mic_btn.configure(state="disabled")
+        self.play_test_btn.configure(state="disabled")
+        self.stop_test_btn.configure(state="normal")
+        out_name = self.config.get("output_device_name", "Default")
+        self.vu_text.configure(text=f"▶️ Playing back recording through '{out_name}'...", text_color="#10b981")
+        threading.Thread(target=self._run_playback_thread, daemon=True).start()
+
+    def _run_playback_thread(self):
+        import pyaudio
+        p = None
+        stream = None
+        out_name = self.config.get("output_device_name", "Default (System Default)")
+        try:
+            p = pyaudio.PyAudio()
+            dev_idx = find_audio_device_index(p, out_name, is_input=False)
+            kwargs = {
+                "format": pyaudio.paInt16,
+                "channels": 1,
+                "rate": 16000,
+                "output": True,
+                "frames_per_buffer": 1024
+            }
+            if dev_idx is not None:
+                kwargs["output_device_index"] = dev_idx
+
+            try:
+                stream = p.open(**kwargs)
+            except Exception:
+                kwargs.pop("output_device_index", None)
+                stream = p.open(**kwargs)
+
+            chunk_size = 2048
+            data = self.test_recorded_audio
+            for i in range(0, len(data), chunk_size):
+                if not self.is_playing_test_audio:
+                    break
+                stream.write(data[i:i + chunk_size])
+        except Exception as e:
+            print(f"[Playback error]: {e}")
+        finally:
+            if stream:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+            if p:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+
+        self.root.after(0, self._finish_playback)
+
+    def _finish_playback(self):
+        self.is_playing_test_audio = False
+        self.test_mic_btn.configure(state="normal")
+        self.play_test_btn.configure(state="normal" if self.test_recorded_audio else "disabled")
+        self.stop_test_btn.configure(state="disabled")
+        self.vu_text.configure(text="Status: Playback finished. Ready.", text_color="#94a3b8")
+
+    def _stop_test_actions(self):
+        self.is_mic_testing = False
+        self.is_playing_test_audio = False
+        self.test_mic_btn.configure(state="normal")
+        self.play_test_btn.configure(state="normal" if self.test_recorded_audio else "disabled")
+        self.stop_test_btn.configure(state="disabled")
+        self.vu_bar.set(0.0)
+        self.vu_text.configure(text="Status: Stopped by user.", text_color="#94a3b8")
 
     def _on_timeout_change(self, value: str):
         try:

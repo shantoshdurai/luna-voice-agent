@@ -586,8 +586,12 @@ def clean_spoken_text(text: str) -> str:
     if not text:
         return ""
     s = text.strip()
+    # 0. Strip raw LLM markup or special tokens (such as DeepSeek DSML tags)
+    s = re.sub(r'<｜[^｜]+｜>', '', s)
+    s = re.sub(r'<\|[^\|]+\|>', '', s)
+    s = re.sub(r'<｜DSML｜[\s\S]*?(?:>|$)', '', s)
 
-    # 0. Summarize multi-item folder listings so TTS does not read hundreds of filenames aloud
+    # 0a. Summarize multi-item folder listings so TTS does not read hundreds of filenames aloud
     if s.startswith("Contents of ") or "items total):" in s:
         m = re.search(r'Contents of ([^(]+)\((\d+)\s+items', s)
         if m:
@@ -595,6 +599,17 @@ def clean_spoken_text(text: str) -> str:
             count = m.group(2).strip()
             return f"I found {count} items in your {folder} folder. I have displayed them on your screen."
         return "I have listed the folder contents on your screen."
+
+    # 0b. Summarize multiline file search results so TTS does not read raw paths
+    if s.count("C:\\") >= 2 or s.count(".prproj") >= 2 or (s.count("\n") >= 4 and ("\\" in s or "/" in s)):
+        lines = [l.strip() for l in s.split("\n") if l.strip()]
+        first_line = lines[0] if lines else ""
+        file_count = sum(1 for l in lines if "\\" in l or "." in l)
+        sample = [os.path.basename(l.rstrip("\\/")) for l in lines if "\\" in l][:3]
+        sample_str = ", ".join(sample)
+        if sample_str:
+            return f"{first_line}. Found {file_count} matching files, including {sample_str}. I have placed them on your screen."
+        return f"I found {file_count} matching files and placed them on your screen."
 
     # 1. Clean markdown code blocks, backticks, bold, headers, list bullets
     s = re.sub(r'```[\s\S]*?```', '', s)
@@ -915,17 +930,11 @@ class FastAgent:
             '<ctrl>+<alt>+h': toggle_console,
         }
 
-        # Try registering Ctrl+Cmd (Ctrl+Win) safely
-        try:
-            hotkey_bindings['<ctrl>+<cmd>'] = on_ptt
-        except Exception:
-            pass
-
         try:
             self.hotkey_listener = keyboard.GlobalHotKeys(hotkey_bindings)
             self.hotkey_listener.daemon = True
             self.hotkey_listener.start()
-            print("[OK] Hotkeys: Ctrl+Shift+Space | Ctrl+Alt+J | Ctrl+Win (Console: Ctrl+Alt+H)")
+            print("[OK] Hotkeys: Ctrl+Shift+Space | Ctrl+Alt+J (Console: Ctrl+Alt+H)")
         except Exception as e:
             print(f"[Warning] Hotkey setup issue: {e}")
 
@@ -1115,9 +1124,13 @@ class FastAgent:
 
         self.history.append({"role": "user", "content": user_text})
 
+        # Always preserve system prompt (index 0) + recent conversational turns
+        recent_turns = self.history[1:][-6:]
+        messages_payload = [self.history[0]] + recent_turns
+
         req_body = {
             "model": OPENROUTER_MODEL,
-            "messages": self.history[-8:],
+            "messages": messages_payload,
             "tools": TOOL_DEFINITIONS,
             "temperature": 0.3,
             "max_tokens": 300
@@ -1231,11 +1244,30 @@ class FastAgent:
                     memory_affected = True
         t_tool = time.time() - t0_tool
 
+        # Check if model returned tool call markup directly in content (leaked DSML)
+        if ("<｜DSML｜" in content or "<|DSML|>" in content) and not tool_calls:
+            m_func = re.search(r'invoke name="([^"]+)"', content)
+            if m_func:
+                leaked_name = m_func.group(1).strip()
+                leaked_args = {}
+                for m_arg in re.finditer(r'parameter name="([^"]+)"(?: string="true")?>([\s\S]*?)</', content):
+                    leaked_args[m_arg.group(1).strip()] = m_arg.group(2).strip()
+                print(f"⚡ [Recovered Leaked DSML Tool]: {leaked_name}({leaked_args})")
+                res = dispatch_tool_call(leaked_name, leaked_args, agent_ref=self)
+                tool_results.append(res)
+                executed_tool_name = leaked_name
+            content = re.sub(r'<｜[^｜]+｜>', '', content)
+            content = re.sub(r'<\|[^\|]+\|>', '', content)
+            content = re.sub(r'<｜DSML｜[\s\S]*?(?:>|$)', '', content).strip()
+
         spoken_response = content.strip()
         if not spoken_response and tool_results:
             spoken_response = " ".join([r for r in tool_results if r])
         elif not spoken_response:
-            spoken_response = "Done."
+            if executed_tool_name:
+                spoken_response = "I have completed that for you."
+            else:
+                spoken_response = "I'm standing by. What can I do for you?"
 
         # Prepare clean speech for natural TTS voice delivery
         cleaned_speech = clean_spoken_text(spoken_response)
@@ -1274,6 +1306,8 @@ class FastAgent:
 
         if memory_affected:
             self.dashboard.refresh_memory_view()
+
+        return executed_tool_name
 
     def tts_speak(self, text: str) -> float:
         """Neural Edge-TTS speech with instant offline SAPI fallback.
@@ -1401,7 +1435,7 @@ class FastAgent:
 
         clean = text.lower().strip(" .,?!\"'")
         words = clean.split()
-        if not words or len(words) > 12:
+        if not words or len(words) > 24:
             return False
 
         entity_guards = {
@@ -1417,6 +1451,15 @@ class FastAgent:
         action_guards = {"open", "play", "search", "show", "read", "run", "launch", "kill", "find", "check"}
         if any(w in action_guards for w in words):
             return False
+
+        # Conversational stop and stop listening commands (e.g. "I said stop, you're listening to me again, I said you do stop")
+        if any(p in clean for p in [
+            "stop listening", "stop hearing", "listening to me again", "stop you're listening",
+            "stop youre listening", "stop listening to me", "i said stop", "i said you do stop",
+            "i told you to stop", "stop talking to me", "quit listening", "dont listen",
+            "don't listen", "stop it jarvis", "leave me alone"
+        ]):
+            return True
 
         # Phonetic STT mishearings of "terminate yourself"
         if any(p in clean for p in ["terminator self", "terminate yourself", "terminal yourself", "terminate your self", "terminator yourself"]):
@@ -1561,7 +1604,12 @@ class FastAgent:
                 break
 
             # Execute normal command
-            self.execute_command_pipeline(user_text, source="voice", t_stt=t_stt)
+            executed_tool = self.execute_command_pipeline(user_text, source="voice", t_stt=t_stt)
+
+            # If Push-to-Talk or if an action tool was executed, finish immediately
+            # (Stops Jarvis from lingering in follow-up mode and generating unwanted phantom responses)
+            if pre_roll_chunks is None or executed_tool:
+                break
 
             # If follow up timeout is 0 (Off), finish turn immediately
             if self.follow_up_timeout <= 0.0:

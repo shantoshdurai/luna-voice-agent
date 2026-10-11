@@ -36,6 +36,32 @@ def get_chrome_exe():
             return p
     return None
 
+HELIUM_PATHS = [
+    os.path.expandvars(r"%LOCALAPPDATA%\imput\Helium\Application\chrome.exe"),
+    r"C:\Users\Dog\AppData\Local\imput\Helium\Application\chrome.exe",
+    os.path.expandvars(r"%PROGRAMFILES%\Helium\Helium.exe"),
+    os.path.expandvars(r"%PROGRAMFILES(X86)%\Helium\Helium.exe"),
+]
+
+def get_helium_exe():
+    for p in HELIUM_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+def get_default_browser_exe():
+    """Returns the executable path and name for the user's default browser (Helium by default)."""
+    he = get_helium_exe()
+    if he:
+        return he, "Helium"
+    ch = get_chrome_exe()
+    if ch:
+        return ch, "Chrome"
+    ff = get_firefox_exe()
+    if ff:
+        return ff, "Firefox"
+    return None, "Default Browser"
+
 def _trigger_playback_after_delay():
     time.sleep(2.0)
     try:
@@ -157,7 +183,13 @@ def play_video(query_or_target, browser=None):
         pass
 
     browser_lower = (browser or "").lower()
-    if "firefox" in browser_lower:
+    if "helium" in browser_lower:
+        he = get_helium_exe()
+        if he:
+            subprocess.Popen([he, target_url])
+            _schedule_autoplay_trigger()
+            return f"Playing '{cleaned_query}' on YouTube in Helium."
+    elif "firefox" in browser_lower:
         ff = get_firefox_exe()
         if ff:
             subprocess.Popen([ff, target_url])
@@ -169,6 +201,13 @@ def play_video(query_or_target, browser=None):
             subprocess.Popen([ch, target_url])
             _schedule_autoplay_trigger()
             return f"Playing '{cleaned_query}' on YouTube in Chrome."
+    else:
+        # User default browser: Helium
+        he = get_helium_exe()
+        if he:
+            subprocess.Popen([he, target_url])
+            _schedule_autoplay_trigger()
+            return f"Playing '{cleaned_query}' on YouTube in Helium."
 
     webbrowser.open(target_url)
     _schedule_autoplay_trigger()
@@ -222,7 +261,12 @@ def open_url(url_or_target, browser=None):
 
     friendly_name = get_friendly_site_name(url, url_or_target)
     browser_lower = (browser or "").lower()
-    if "firefox" in browser_lower:
+    if "helium" in browser_lower:
+        he = get_helium_exe()
+        if he:
+            subprocess.Popen([he, url])
+            return f"Opened {friendly_name} in Helium."
+    elif "firefox" in browser_lower:
         ff = get_firefox_exe()
         if ff:
             subprocess.Popen([ff, url])
@@ -232,6 +276,12 @@ def open_url(url_or_target, browser=None):
         if ch:
             subprocess.Popen([ch, url])
             return f"Opened {friendly_name} in Chrome."
+    else:
+        # User default browser: Helium
+        he = get_helium_exe()
+        if he:
+            subprocess.Popen([he, url])
+            return f"Opened {friendly_name} in Helium."
 
     webbrowser.open(url)
     return f"Opened {friendly_name}."
@@ -468,7 +518,14 @@ def open_app(app_name):
         return "Please specify an application to open."
 
     # Built-in handlers for shell components and browsers
-    if "firefox" in name:
+    if "helium" in name or name in ("browser", "my browser", "default browser", "the browser"):
+        he = get_helium_exe()
+        if he:
+            subprocess.Popen([he])
+            return "Launched Helium Browser."
+        subprocess.Popen(["start", "helium"], shell=True)
+        return "Launched Helium."
+    elif "firefox" in name:
         ff = get_firefox_exe()
         if ff:
             subprocess.Popen([ff])
@@ -563,7 +620,25 @@ def close_app(app_name):
     targets = []
     display_name = app_name
 
-    if "chrome" in name:
+    if "helium" in name or name in ("browser", "my browser", "the browser"):
+        try:
+            import psutil
+            killed = False
+            for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                try:
+                    exe = (proc.info.get('exe') or '').lower()
+                    if 'helium' in exe:
+                        proc.kill()
+                        killed = True
+                except Exception:
+                    pass
+            if killed:
+                return "Closed Helium."
+        except Exception:
+            pass
+        targets = ["chrome.exe"]
+        display_name = "Helium"
+    elif "chrome" in name:
         targets = ["chrome.exe"]
         display_name = "Google Chrome"
     elif "firefox" in name:
@@ -1141,12 +1216,16 @@ def detect_and_run_intent(text):
     """
     t = text.lower().strip()
 
-    # Browser preference
+    # Browser preference (default: Helium)
     browser = None
-    if "firefox" in t:
+    if "helium" in t:
+        browser = "helium"
+    elif "firefox" in t:
         browser = "firefox"
     elif "chrome" in t:
         browser = "chrome"
+    else:
+        browser = "helium"
 
     # 1. Vision / Screen Reading Intent ("Look at my screen", "What's on my screen")
     if any(p in t for p in ["look at my screen", "what is on my screen", "what's on my screen", "can you see my screen", "read my screen", "inspect my screen", "see my screen", "look at screen", "read the screen", "check my screen"]):
@@ -1231,13 +1310,13 @@ def detect_and_run_intent(text):
             m = re.search(r'play\s+(.+)', clean)
 
         query = m.group(1).strip() if m else ""
-        query = re.sub(r'\b(in\s+my\s+browser|in\s+browser|in\s+firefox|in\s+chrome|please|for\s+me|tab|video|videos)\b', '', query).strip()
+        query = re.sub(r'\b(in\s+my\s+browser|in\s+browser|in\s+helium|in\s+firefox|in\s+chrome|please|for\s+me|tab|video|videos)\b', '', query).strip()
         query = re.sub(r'^(for|about|with|the)\s+', '', query).strip()
         query = query.strip('\'".,?! ')
 
         if query in ["", "homepage", "app", "site", "website"]:
             res = open_url("https://www.youtube.com", browser=browser)
-            speech = "Opening YouTube in Firefox for you." if browser == "firefox" else "Opening YouTube for you."
+            speech = f"Opening YouTube in {browser.title()} for you." if browser else "Opening YouTube for you."
             return True, f"[Action: {res}]", speech, False
         elif query in ["something", "a video", "any video", "videos"]:
             res = open_url("https://www.youtube.com", browser=browser)
@@ -1348,9 +1427,10 @@ def detect_and_run_intent(text):
         if "vs code" in t or "vscode" in t or "code" in t:
             res = open_app("code")
             return True, f"[Action: {res}]", "Launching Visual Studio Code for you.", False
-        for app in ["firefox", "chrome", "notepad", "terminal", "powershell", "cmd", "calculator", "calc", "explorer"]:
+        for app in ["helium", "browser", "firefox", "chrome", "notepad", "terminal", "powershell", "cmd", "calculator", "calc", "explorer"]:
             if re.search(r'\b' + app + r'\b', t):
                 res = open_app(app)
-                return True, f"[Action: {res}]", f"Launching {app.capitalize()} for you.", False
+                app_disp = "Helium Browser" if app in ("helium", "browser") else app.capitalize()
+                return True, f"[Action: {res}]", f"Launching {app_disp} for you.", False
 
     return False, None, None, False

@@ -105,9 +105,9 @@ def test_persistent_memory_lifecycle():
     """Evaluates save, recall, update, context injection, and persistence."""
     print("\n--- Test Suite 3: Persistent Memory Lifecycle ---")
     # 1. Save preferences
-    s1 = mm.remember_fact_or_note("remember that my preferred browser is Firefox")
+    s1 = mm.remember_fact_or_note("remember that my preferred browser is Helium")
     print("  Save 1:", s1)
-    assert "Firefox" in s1
+    assert "Helium" in s1
 
     s2 = mm.remember_fact_or_note("my favorite music is Loki soundtrack")
     print("  Save 2:", s2)
@@ -121,7 +121,7 @@ def test_persistent_memory_lifecycle():
     # 3. Specific recall
     r_browser = mm.recall_memories("browser")
     print("  Recall 'browser':", r_browser)
-    assert "Firefox" in r_browser
+    assert "Helium" in r_browser
 
     r_music = mm.recall_memories("music")
     print("  Recall 'music':", r_music)
@@ -130,13 +130,13 @@ def test_persistent_memory_lifecycle():
     # 4. Global recall
     r_all = mm.recall_memories()
     print("  Recall All:", r_all)
-    assert "Firefox" in r_all
+    assert "Helium" in r_all
     assert "Shantosh" in r_all
 
     # 5. System prompt context injection
     ctx = mm.get_memory_context_string()
     print("  Injected Context:", ctx)
-    assert "Firefox" in ctx
+    assert "Helium" in ctx
     assert "Shantosh" in ctx
 
     # 6. Direct note & fact CRUD operations (used by Dashboard GUI)

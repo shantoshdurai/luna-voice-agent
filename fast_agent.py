@@ -193,6 +193,7 @@ VOICE & TTS GUIDELINES:
 - When asked to play music or videos, call play_video.
 - If audio or video is already open in the browser and the user says 'play it', 'it is not playing', 'resume', or 'pause', call browser_control(action='play_pause'). NEVER call play_video again if a tab is already open.
 - When asked to switch tabs, go to next/previous tab, close tab, reopen closed tab, reload tab, or inspect/read the active tab's URL, call browser_control.
+- The user's default browser is Helium (not Firefox or Chrome). Always use or assume Helium when asked to open websites, browser tabs, or videos unless another browser is explicitly named.
 - When asked to organize, sort, arrange, or clean up files in a folder (such as Downloads or Desktop), ALWAYS call organize_folder. Never just list files and stop!
 - When asked to create a folder or directory, call create_folder.
 - When asked to open apps, websites, or folders, call the appropriate tool.
@@ -220,7 +221,7 @@ TOOL_DEFINITIONS = [
                     },
                     "browser": {
                         "type": "string",
-                        "description": "Browser to use: 'default', 'firefox', or 'chrome'.",
+                        "description": "Browser to use: 'default' (Helium), 'helium', 'firefox', or 'chrome'.",
                         "default": "default"
                     }
                 },
@@ -232,7 +233,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "browser_control",
-            "description": "Controls browser tabs, URL navigation, and media playback across Firefox, Chrome, and Edge.",
+            "description": "Controls browser tabs, URL navigation, and media playback across Helium, Firefox, Chrome, and Edge.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -257,7 +258,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "open_app",
-            "description": "Launch an application on the PC (e.g. firefox, chrome, code/vscode, notepad, terminal/cmd, calc, explorer, blender, godot).",
+            "description": "Launch an application on the PC (e.g. helium, firefox, chrome, code/vscode, notepad, terminal/cmd, calc, explorer, blender, godot).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -274,13 +275,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "close_app",
-            "description": "Close or terminate a running application, browser, or active window (e.g. 'close chrome', 'close firefox', 'close notepad', 'close window').",
+            "description": "Close or terminate a running application, browser, or active window (e.g. 'helium', 'chrome', 'firefox', 'notepad', 'code', 'window').",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "app_name": {
                         "type": "string",
-                        "description": "Name or process of application to close (e.g. 'chrome', 'firefox', 'notepad', 'code', 'window')."
+                        "description": "Name or process of application to close (e.g. 'helium', 'chrome', 'firefox', 'notepad', 'code', 'window')."
                     }
                 },
                 "required": ["app_name"]
@@ -477,7 +478,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "save_memory",
-            "description": "Store a user fact, preference, or note into persistent memory forever (e.g. 'remember that my favorite browser is Firefox', 'save note: project meeting at 3pm').",
+            "description": "Store a user fact, preference, or note into persistent memory forever (e.g. 'remember that my favorite browser is Helium', 'save note: project meeting at 3pm').",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1585,7 +1586,7 @@ class FastAgent:
             return False
 
         entity_guards = {
-            "chrome", "firefox", "edge", "browser", "window", "tab", "tabs",
+            "helium", "chrome", "firefox", "edge", "browser", "window", "tab", "tabs",
             "app", "application", "file", "files", "folder", "download", "downloads",
             "youtube", "video", "music", "song", "screen", "process", "program",
             "code", "terminal", "powershell", "cmd", "notepad", "calculator", "calc",

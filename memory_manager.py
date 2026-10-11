@@ -9,7 +9,7 @@ MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.j
 DEFAULT_MEMORY: Dict[str, Any] = {
     "user_name": "Shantosh",
     "facts": {
-        "preferred_browser": "Firefox",
+        "preferred_browser": "Helium",
         "primary_os": "Windows 11"
     },
     "notes": []

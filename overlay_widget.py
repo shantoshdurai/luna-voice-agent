@@ -15,10 +15,24 @@ import math
 import threading
 import queue
 import tkinter as tk
+import ctypes
 import numpy as np
 import pygame
 import io
 import wave
+
+
+def ensure_default_desktop():
+    """Attaches thread to interactive desktop WinSta0\\Default so GUI windows
+    are rendered on the user's visible display regardless of launcher environment.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        hdesk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
 
 
 # Sound Synthesis matching OpenWhispr dictationCues.js
@@ -109,6 +123,7 @@ class FloatingVoicePill:
         self.queue.put(("destroy", None))
 
     def _init_ui(self, parent_widget):
+        ensure_default_desktop()
         if parent_widget is not None:
             self.root = tk.Toplevel(parent_widget)
         else:
@@ -352,12 +367,21 @@ class FloatingVoicePill:
             )
 
         else: # idle
-            # Sleek subtle resting orb with glowing blue ring and mic badge
+            # Sleek subtle resting orb with glowing sky blue ring and mic badge
             w = self.w_idle
             cx, cy = w / 2, mid_y
             r = 18
-            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#121215", outline="#2563eb", width=1.8)
-            self._draw_mic_icon(cx, cy, color="#60a5fa")
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#16161a", outline="#38bdf8", width=2.0)
+            self._draw_mic_icon(cx, cy, color="#38bdf8")
+
+        # Periodically affirm topmost z-order
+        if getattr(self, "_frame_count", 0) % 60 == 0:
+            try:
+                self.root.lift()
+                self.root.attributes("-topmost", True)
+            except Exception:
+                pass
+        self._frame_count = getattr(self, "_frame_count", 0) + 1
 
         # Loop at ~35 FPS for buttery smooth animation
         self.root.after(28, self._animate)

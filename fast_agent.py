@@ -83,6 +83,18 @@ def acquire_single_instance_mutex() -> bool:
     except Exception:
         return True
 
+def ensure_default_desktop():
+    """Attaches thread to interactive desktop WinSta0\\Default so GUI windows and tray
+    icons are rendered on the user's visible display regardless of launcher environment.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        hdesk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -729,6 +741,9 @@ class FastAgent:
         self.manual_stop_recording = threading.Event()
         self.is_recording_active = False
 
+        # Ensure main UI thread is attached to user's interactive desktop (WinSta0\Default)
+        ensure_default_desktop()
+
         # 1. Initialize Dashboard GUI
         self.dashboard = JarvisDashboard(
             on_trigger_voice=self.trigger_voice,
@@ -982,7 +997,8 @@ class FastAgent:
                 pass
 
     def _setup_tray(self):
-        """Windows system tray icon with OpenWhispr blue circular badge."""
+        """Windows system tray icon with official Jarvis logo."""
+        ensure_default_desktop()
         try:
             import pystray
             from PIL import Image, ImageDraw
@@ -1911,6 +1927,9 @@ if __name__ == "__main__":
     if check_single_instance(IPC_PORT):
         print("[OK] Jarvis is already running in background. Sent signal to open dashboard.")
         sys.exit(0)
+
+    # Attach thread to interactive desktop WinSta0\Default
+    ensure_default_desktop()
 
     # First instance: run full background agent
     agent = FastAgent()

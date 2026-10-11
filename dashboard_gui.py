@@ -22,6 +22,22 @@ import threading
 from datetime import datetime
 from typing import Optional, Callable, Dict, Any, List
 
+import ctypes
+
+def ensure_default_desktop():
+    """Attaches thread to interactive desktop WinSta0\\Default so GUI windows
+    are rendered on the user's visible display regardless of launcher environment.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        hdesk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
+
+ensure_default_desktop()
+
 import customtkinter as ctk
 
 # Configure theme

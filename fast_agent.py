@@ -18,9 +18,24 @@ Features:
 
 import os
 import sys
+import ctypes
+
+def ensure_default_desktop():
+    """Attaches thread to interactive desktop WinSta0\\Default so GUI windows and tray
+    icons are rendered on the user's visible display regardless of launcher environment.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        hdesk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
+
+# Attach main thread to interactive user desktop before any GUI, SDL, or audio libraries load
+ensure_default_desktop()
 
 # Hide console window immediately if not launched with --console
-import ctypes
 if "--console" not in sys.argv:
     try:
         hwnd = ctypes.windll.kernel32.GetConsoleWindow()
@@ -82,18 +97,6 @@ def acquire_single_instance_mutex() -> bool:
         return True
     except Exception:
         return True
-
-def ensure_default_desktop():
-    """Attaches thread to interactive desktop WinSta0\\Default so GUI windows and tray
-    icons are rendered on the user's visible display regardless of launcher environment.
-    """
-    try:
-        user32 = ctypes.windll.user32
-        hdesk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
-        if hdesk:
-            user32.SetThreadDesktop(hdesk)
-    except Exception:
-        pass
 
 try:
     from dotenv import load_dotenv

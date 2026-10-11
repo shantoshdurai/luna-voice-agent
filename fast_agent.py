@@ -59,28 +59,29 @@ import winsound
 
 IPC_PORT = 49155
 
-# Windows Named Mutex: Kernel-level single instance guarantee.
-# Prevents duplicate processes, simultaneous voice playback, and port collisions.
 MUTEX_NAME = "Global\\JarvisAI_FastAgent_SingleInstance_Mutex_v1"
 ERROR_ALREADY_EXISTS = 183
 _JARVIS_MUTEX = None
-try:
-    kernel32 = ctypes.windll.kernel32
-    _JARVIS_MUTEX = kernel32.CreateMutexW(None, False, MUTEX_NAME)
-    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-        # A primary instance of Jarvis is ALREADY running!
-        # Send signal via IPC to open dashboard, then terminate immediately.
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.8)
-            s.connect(("127.0.0.1", IPC_PORT))
-            s.sendall(b"SHOW_DASHBOARD\n")
-            s.close()
-        except Exception:
-            pass
-        sys.exit(0)
-except Exception:
-    pass
+
+def acquire_single_instance_mutex() -> bool:
+    """Acquires Windows kernel mutex. Returns True if primary instance, False if duplicate."""
+    global _JARVIS_MUTEX
+    try:
+        kernel32 = ctypes.windll.kernel32
+        _JARVIS_MUTEX = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.8)
+                s.connect(("127.0.0.1", IPC_PORT))
+                s.sendall(b"SHOW_DASHBOARD\n")
+                s.close()
+            except Exception:
+                pass
+            return False
+        return True
+    except Exception:
+        return True
 
 try:
     from dotenv import load_dotenv
@@ -741,7 +742,11 @@ class FastAgent:
 
         # 2. OpenWhispr Floating Voice Pill Overlay (attached to CTk root)
         try:
-            self.pill = FloatingVoicePill(parent=self.dashboard.root)
+            self.pill = FloatingVoicePill(
+                parent=self.dashboard.root,
+                on_trigger_voice=self.trigger_voice,
+                on_show_dashboard=self.dashboard.show
+            )
             self.pill.sfx_enabled = self.sfx_enabled
             print("[OK] OpenWhispr Floating Voice Pill overlay active")
         except Exception as e:
@@ -983,14 +988,23 @@ class FastAgent:
             from PIL import Image, ImageDraw
 
             def create_tray_image():
+                icon_path = os.path.join(BASE_DIR, "jarvis_icon.png")
+                if os.path.exists(icon_path):
+                    try:
+                        return Image.open(icon_path)
+                    except Exception:
+                        pass
+                icon_ico = os.path.join(BASE_DIR, "jarvis_icon.ico")
+                if os.path.exists(icon_ico):
+                    try:
+                        return Image.open(icon_ico)
+                    except Exception:
+                        pass
                 size = 64
                 img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
                 d = ImageDraw.Draw(img)
-                d.rounded_rectangle((4, 10, size - 4, size - 10), radius=16, fill=(14, 116, 224, 255))
-                d.ellipse((14, 22, 30, 42), outline=(255, 255, 255, 255), width=3)
-                d.ellipse((size - 30, 22, size - 14, 42), outline=(255, 255, 255, 255), width=3)
-                d.line((26, 24, size - 26, 40), fill=(255, 255, 255, 255), width=3)
-                d.line((26, 40, size - 26, 24), fill=(255, 255, 255, 255), width=3)
+                d.ellipse((4, 4, size - 4, size - 4), fill=(15, 23, 42, 255), outline=(56, 189, 248, 255), width=3)
+                d.ellipse((18, 18, size - 18, size - 18), fill=(37, 99, 235, 255), outline=(255, 255, 255, 255), width=2)
                 return img
 
             def on_open_dashboard(icon=None, item=None):
@@ -1888,7 +1902,12 @@ class FastAgent:
 
 
 if __name__ == "__main__":
-    # Check if Jarvis is already running; if so, open dashboard and exit cleanly
+    # Check if Jarvis is already running via Windows kernel mutex
+    if not acquire_single_instance_mutex():
+        print("[OK] Jarvis is already running in background. Sent signal to open dashboard.")
+        sys.exit(0)
+
+    # Check if Jarvis is already running via IPC socket fallback
     if check_single_instance(IPC_PORT):
         print("[OK] Jarvis is already running in background. Sent signal to open dashboard.")
         sys.exit(0)

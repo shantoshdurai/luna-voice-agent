@@ -49,8 +49,10 @@ def _make_sound_cue(notes: list, sr: int = 44100):
 
 
 class FloatingVoicePill:
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, on_trigger_voice=None, on_show_dashboard=None):
         self.parent = parent
+        self.on_trigger_voice = on_trigger_voice
+        self.on_show_dashboard = on_show_dashboard
         self.state = "idle"  # idle, recording, processing, speaking, listening
         self.current_level = 0.0
         self.target_level = 0.0
@@ -128,37 +130,61 @@ class FloatingVoicePill:
         self.w_rec = 114
         self.h = 42
 
-        # Position at bottom-right just above Windows taskbar tray
-        self.pos_x = screen_w - self.w_rec - 30
-        self.pos_y = screen_h - self.h - 60
+        # Anchor position pinned relative to bottom-right
+        self.anchor_right_x = screen_w - 30
+        self.anchor_y = screen_h - self.h - 60
+        self._current_w = self.w_idle
 
-        self.root.geometry(f"{self.w_rec}x{self.h}+{self.pos_x}+{self.pos_y}")
+        init_x = self.anchor_right_x - self.w_idle
+        self.root.geometry(f"{self.w_idle}x{self.h}+{init_x}+{self.anchor_y}")
 
         self.canvas = tk.Canvas(
             self.root,
-            width=self.w_rec,
+            width=self.w_idle,
             height=self.h,
             bg=TRANS_COLOR,
-            highlightthickness=0
+            highlightthickness=0,
+            cursor="hand2"
         )
         self.canvas.pack(fill="both", expand=True)
 
-        # Start hidden by default
-        self.root.withdraw()
-        self._is_visible = False
+        # Always visible as sleek resting orb
+        self.root.deiconify()
+        self._is_visible = True
 
-        # Make widget draggable
-        def start_drag(event):
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+        self._has_dragged = False
+
+        def on_press(event):
             self._drag_start_x = event.x
             self._drag_start_y = event.y
+            self._has_dragged = False
 
         def do_drag(event):
-            x = self.root.winfo_x() + (event.x - self._drag_start_x)
-            y = self.root.winfo_y() + (event.y - self._drag_start_y)
-            self.root.geometry(f"+{x}+{y}")
+            dx = abs(event.x - self._drag_start_x)
+            dy = abs(event.y - self._drag_start_y)
+            if dx > 4 or dy > 4:
+                self._has_dragged = True
+            new_x = self.root.winfo_x() + (event.x - self._drag_start_x)
+            new_y = self.root.winfo_y() + (event.y - self._drag_start_y)
+            self.root.geometry(f"+{new_x}+{new_y}")
+            self.anchor_right_x = new_x + self._current_w
+            self.anchor_y = new_y
 
-        self.canvas.bind("<Button-1>", start_drag)
+        def on_release(event):
+            if not self._has_dragged:
+                if self.on_trigger_voice:
+                    self.on_trigger_voice()
+
+        def on_double_click(event):
+            if self.on_show_dashboard:
+                self.on_show_dashboard()
+
+        self.canvas.bind("<Button-1>", on_press)
         self.canvas.bind("<B1-Motion>", do_drag)
+        self.canvas.bind("<ButtonRelease-1>", on_release)
+        self.canvas.bind("<Double-Button-1>", on_double_click)
 
         # Start animation ticker
         self._animate()
@@ -179,14 +205,14 @@ class FloatingVoicePill:
         self.canvas.create_line(2 + r, 2, w - 2 - r, 2, fill=outline, width=1.5)
         self.canvas.create_line(2 + r, h - 2, w - 2 - r, h - 2, fill=outline, width=1.5)
 
-    def _draw_mic_icon(self, cx, cy):
+    def _draw_mic_icon(self, cx, cy, color="#ffffff"):
         # White circular mic badge
         r_outer = 13
-        self.canvas.create_oval(cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer, outline="#ffffff", width=1.5)
+        self.canvas.create_oval(cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer, outline=color, width=1.5)
         # Inner vertical sound bars inside circle
-        self.canvas.create_line(cx - 4, cy - 4, cx - 4, cy + 4, fill="#ffffff", width=1.5)
-        self.canvas.create_line(cx, cy - 7, cx, cy + 7, fill="#ffffff", width=2)
-        self.canvas.create_line(cx + 4, cy - 4, cx + 4, cy + 4, fill="#ffffff", width=1.5)
+        self.canvas.create_line(cx - 4, cy - 4, cx - 4, cy + 4, fill=color, width=1.5)
+        self.canvas.create_line(cx, cy - 7, cx, cy + 7, fill=color, width=2)
+        self.canvas.create_line(cx + 4, cy - 4, cx + 4, cy + 4, fill=color, width=1.5)
 
     def _animate(self):
         if not self.is_running:
@@ -210,78 +236,109 @@ class FloatingVoicePill:
                     pass
                 return
 
-        # Manage auto-show and auto-hide
-        if self.state in ("recording", "processing", "speaking", "listening"):
-            if not self._is_visible:
+        # Always maintain visibility (never withdraw into thin air)
+        if not self._is_visible:
+            try:
                 self.root.deiconify()
                 self._is_visible = True
-            self._last_active_time = time.time()
-        else:
-            if self._is_visible:
-                if time.time() - self._last_active_time > 0.5:
-                    self.root.withdraw()
-                    self._is_visible = False
+            except Exception:
+                pass
+
+        # Smooth dynamic geometry expansion / contraction
+        target_w = self.w_rec if self.state in ("recording", "listening", "speaking") else self.w_idle
+        if getattr(self, "_current_w", None) != target_w:
+            self._current_w = target_w
+            cur_x = self.anchor_right_x - target_w
+            self.root.geometry(f"{target_w}x{self.h}+{cur_x}+{self.anchor_y}")
+            self.canvas.configure(width=target_w)
 
         self.canvas.delete("all")
         self.current_level += (self.target_level - self.current_level) * 0.35
+        mid_y = self.h / 2
 
-        if self.state == "recording":
-            # Expand to 110px pill with animated waveform
+        if self.state in ("recording", "listening"):
+            # Expand to 114px pill with live audio level detection (OpenWhispr style)
             w = self.w_rec
-            self._draw_pill_bg(w, self.h, fill="#16161a", outline="#2e2e38")
-            self._draw_mic_icon(20, self.h / 2)
+            is_recording = (self.state == "recording")
+            outline_col = "#38bdf8" if is_recording else "#0284c7"
+            self._draw_pill_bg(w, self.h, fill="#16161a", outline=outline_col)
+            self._draw_mic_icon(20, mid_y, color="#38bdf8" if is_recording else "#0284c7")
 
-            # Draw 8 animated waveform equalizer bars
-            num_bars = 8
             start_x = 42
-            bar_gap = 7
-            max_bar_h = 22
-            min_bar_h = 4
-            mid_y = self.h / 2
+            end_x = 104
+            level = max(0.0, min(1.0, self.current_level))
 
-            t_ms = time.time() * 10
-            for i in range(num_bars):
-                bx = start_x + i * bar_gap
-                # Smooth sinusoidal variation driven by volume level
-                wave_factor = 0.5 + 0.5 * math.sin(t_ms + i * 0.8)
-                bar_h = min_bar_h + (max_bar_h - min_bar_h) * self.current_level * wave_factor
+            # OpenWhispr sound detection:
+            # Flat line when quiet (< 0.05). Dynamic undulating wave when speaking!
+            if level < 0.05:
+                line_color = "#94a3b8" if is_recording else "#64748b"
                 self.canvas.create_line(
-                    bx, mid_y - bar_h / 2,
-                    bx, mid_y + bar_h / 2,
-                    fill="#f4f4f5",
+                    start_x, mid_y, end_x, mid_y,
+                    fill=line_color,
+                    width=2.0,
+                    capstyle="round"
+                )
+            else:
+                num_points = 25
+                coords = []
+                t_time = time.time() * (14 if is_recording else 10)
+                wave_color = "#38bdf8" if is_recording else "#00e5ff"
+                max_amp = (self.h * 0.38)
+                for j in range(num_points):
+                    ratio = j / (num_points - 1)
+                    px = start_x + ratio * (end_x - start_x)
+                    envelope = math.sin(ratio * math.pi)
+                    w1 = math.sin(t_time + ratio * 3.5 * math.pi)
+                    w2 = 0.35 * math.sin(t_time * 1.8 + ratio * 7.0 * math.pi)
+                    py = mid_y + (max_amp * level * envelope) * (w1 + w2)
+                    coords.extend([px, py])
+
+                self.canvas.create_line(
+                    coords,
+                    smooth=True,
+                    fill=wave_color,
                     width=2.5,
                     capstyle="round"
                 )
 
-        elif self.state == "listening":
-            # 110px pill showing gentle breathing wave bars (attentive follow-up mode)
+        elif self.state == "speaking":
+            # 114px pill with undulating voice playback wave
             w = self.w_rec
-            self._draw_pill_bg(w, self.h, fill="#16161a", outline="#0284c7")
-            self._draw_mic_icon(20, self.h / 2)
+            self._draw_pill_bg(w, self.h, fill="#16161a", outline="#00e676")
+            self._draw_mic_icon(20, mid_y, color="#00e676")
 
-            num_bars = 6
-            start_x = 44
-            bar_gap = 9
-            mid_y = self.h / 2
-            t_ms = time.time() * 4
-            for i in range(num_bars):
-                bx = start_x + i * bar_gap
-                pulse = 3 + 5 * (0.5 + 0.5 * math.sin(t_ms - i * 0.6))
-                self.canvas.create_line(
-                    bx, mid_y - pulse,
-                    bx, mid_y + pulse,
-                    fill="#38bdf8",
-                    width=2,
-                    capstyle="round"
-                )
+            start_x = 42
+            end_x = 104
+            level = max(0.25, min(1.0, self.current_level))
+
+            num_points = 25
+            coords = []
+            t_time = time.time() * 12
+            max_amp = (self.h * 0.38)
+            for j in range(num_points):
+                ratio = j / (num_points - 1)
+                px = start_x + ratio * (end_x - start_x)
+                envelope = math.sin(ratio * math.pi)
+                w1 = math.sin(t_time + ratio * 3.2 * math.pi)
+                w2 = 0.3 * math.sin(t_time * 2.0 + ratio * 6.5 * math.pi)
+                py = mid_y + (max_amp * level * envelope) * (w1 + w2)
+                coords.extend([px, py])
+
+            self.canvas.create_line(
+                coords,
+                smooth=True,
+                fill="#00e676",
+                width=2.5,
+                capstyle="round"
+            )
 
         elif self.state == "processing":
-            # Circular 40x40 orb with rotating cyan spinner ring
+            # Circular 44x42 orb with rotating cyan spinner ring
             w = self.w_idle
-            cx, cy = w / 2, self.h / 2
+            cx, cy = w / 2, mid_y
             r = 18
             self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#18181b", outline="#27272a", width=1.5)
-            self._draw_mic_icon(cx, cy)
+            self._draw_mic_icon(cx, cy, color="#00dcff")
 
             # Rotating glowing cyan arc
             self.spin_angle = (self.spin_angle + 14) % 360
@@ -294,22 +351,13 @@ class FloatingVoicePill:
                 style="arc"
             )
 
-        elif self.state == "speaking":
-            # Glowing cyan/green pulsing orb
-            w = self.w_idle
-            cx, cy = w / 2, self.h / 2
-            r = 18
-            pulse = 1.0 + 0.15 * math.sin(time.time() * 8)
-            self.canvas.create_oval(cx - r*pulse, cy - r*pulse, cx + r*pulse, cy + r*pulse, fill="#18181b", outline="#00e676", width=2)
-            self._draw_mic_icon(cx, cy)
-
         else: # idle
-            # Subtle dark orb
+            # Sleek subtle resting orb with glowing blue ring and mic badge
             w = self.w_idle
-            cx, cy = w / 2, self.h / 2
-            r = 17
-            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#121215", outline="#222226", width=1.5)
-            self._draw_mic_icon(cx, cy)
+            cx, cy = w / 2, mid_y
+            r = 18
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#121215", outline="#2563eb", width=1.8)
+            self._draw_mic_icon(cx, cy, color="#60a5fa")
 
         # Loop at ~35 FPS for buttery smooth animation
         self.root.after(28, self._animate)

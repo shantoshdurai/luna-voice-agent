@@ -57,6 +57,31 @@ import pyaudio
 import pygame
 import winsound
 
+IPC_PORT = 49155
+
+# Windows Named Mutex: Kernel-level single instance guarantee.
+# Prevents duplicate processes, simultaneous voice playback, and port collisions.
+MUTEX_NAME = "Global\\JarvisAI_FastAgent_SingleInstance_Mutex_v1"
+ERROR_ALREADY_EXISTS = 183
+_JARVIS_MUTEX = None
+try:
+    kernel32 = ctypes.windll.kernel32
+    _JARVIS_MUTEX = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        # A primary instance of Jarvis is ALREADY running!
+        # Send signal via IPC to open dashboard, then terminate immediately.
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.8)
+            s.connect(("127.0.0.1", IPC_PORT))
+            s.sendall(b"SHOW_DASHBOARD\n")
+            s.close()
+        except Exception:
+            pass
+        sys.exit(0)
+except Exception:
+    pass
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -101,6 +126,37 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
 CHUNK = 1280
+
+
+def find_input_device_index(p: pyaudio.PyAudio, device_name: Optional[str]) -> Optional[int]:
+    """Resolves PyAudio device index from a user-friendly device name.
+    Returns None if default system device should be used.
+    """
+    if not device_name or device_name.startswith("Default") or device_name.lower() == "default":
+        return None
+    # 1. Search Host API 0 (MME on Windows) first
+    try:
+        mme = p.get_host_api_info_by_index(0)
+        for dev_idx in range(mme.get('deviceCount', 0)):
+            info = p.get_device_info_by_host_api_device_index(0, dev_idx)
+            if info.get('maxInputChannels', 0) > 0:
+                name = info.get('name', '').strip()
+                if name.lower() == device_name.lower() or name.lower().startswith(device_name.lower()[:20]):
+                    return info.get('index')
+    except Exception:
+        pass
+    # 2. Global search across all host APIs
+    target = device_name.lower()
+    for i in range(p.get_device_count()):
+        try:
+            info = p.get_device_info_by_index(i)
+            if info.get('maxInputChannels', 0) > 0:
+                name = info.get('name', '').strip().lower()
+                if target in name or name in target:
+                    return i
+        except Exception:
+            continue
+    return None
 
 # Pygame mixer for audio playback
 try:
@@ -707,25 +763,12 @@ class FastAgent:
 
         # 5. Microphone Stream
         self.audio = pyaudio.PyAudio()
-        self.mic_stream = self.audio.open(
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RATE,
-            input=True,
-            frames_per_buffer=CHUNK
-        )
+        self.mic_lock = threading.Lock()
+        self.input_device_name = self.config.get("input_device_name", "Default (System Default)")
+        self.mic_stream = None
+        self._init_mic_stream(self.input_device_name)
 
-        # 6. Ambient Noise Calibration
-        calib_frames = []
-        for _ in range(int(RATE / CHUNK * 0.4)):
-            data = self.mic_stream.read(CHUNK, exception_on_overflow=False)
-            calib_frames.append(np.frombuffer(data, dtype=np.int16))
-        all_calib = np.concatenate(calib_frames)
-        self.noise_floor = int(np.abs(all_calib).mean())
-        self.speech_threshold = max(800, int(self.noise_floor * 1.35))
-        print(f"[OK] Calibrated noise floor: {self.noise_floor} | Speech threshold: {self.speech_threshold}")
-
-        # 7. State & Queues
+        # 6. State & Queues
         self.is_listening = threading.Event()
         self.is_speaking = threading.Event()
         self.command_queue = queue.Queue()
@@ -807,6 +850,58 @@ class FastAgent:
             print(f"[Warning] OpenWakeWord error ({e}).")
             self.oww = None
 
+    def _init_mic_stream(self, device_name: Optional[str] = None):
+        """Initializes or reconfigures microphone stream for selected input device."""
+        if not hasattr(self, "mic_lock"):
+            self.mic_lock = threading.Lock()
+
+        idx = find_input_device_index(self.audio, device_name)
+        dev_label = device_name if device_name else "System Default"
+        print(f"[*] Configuring microphone: '{dev_label}' (device index: {idx})")
+
+        with self.mic_lock:
+            if hasattr(self, "mic_stream") and self.mic_stream is not None:
+                try:
+                    self.mic_stream.stop_stream()
+                    self.mic_stream.close()
+                except Exception:
+                    pass
+
+            kwargs = {
+                "format": FORMAT,
+                "channels": CHANNELS,
+                "rate": RATE,
+                "input": True,
+                "frames_per_buffer": CHUNK
+            }
+            if idx is not None:
+                kwargs["input_device_index"] = idx
+
+            try:
+                self.mic_stream = self.audio.open(**kwargs)
+            except Exception as e:
+                print(f"[Warning] Failed to open microphone '{dev_label}' (index {idx}): {e}. Falling back to default.")
+                kwargs.pop("input_device_index", None)
+                try:
+                    self.mic_stream = self.audio.open(**kwargs)
+                except Exception as ex2:
+                    print(f"[Error] Microphone default open failed: {ex2}")
+                    return
+
+            # Re-calibrate ambient noise floor
+            try:
+                calib_frames = []
+                for _ in range(int(RATE / CHUNK * 0.4)):
+                    data = self.mic_stream.read(CHUNK, exception_on_overflow=False)
+                    calib_frames.append(np.frombuffer(data, dtype=np.int16))
+                if calib_frames:
+                    all_calib = np.concatenate(calib_frames)
+                    self.noise_floor = int(np.abs(all_calib).mean())
+                    self.speech_threshold = max(800, int(self.noise_floor * 1.35))
+                    print(f"[OK] Calibrated noise floor: {self.noise_floor} | Speech threshold: {self.speech_threshold}")
+            except Exception as e:
+                print(f"[Warning] Noise calibration error: {e}")
+
     def clear_history_context(self):
         """Resets active LLM conversation memory."""
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -823,8 +918,15 @@ class FastAgent:
         self.wake_word_enabled = bool(self.config.get("wake_word_enabled", True))
         self.wake_words = [w.lower().strip() for w in self.config.get("wake_words", ["hey jarvis", "jarvis"])]
         self._load_wake_models()
+
+        # Check if microphone device changed
+        new_mic = self.config.get("input_device_name", "Default (System Default)")
+        if getattr(self, "input_device_name", None) != new_mic:
+            self.input_device_name = new_mic
+            self._init_mic_stream(self.input_device_name)
+
         save_config(self.config)
-        print(f"[Settings Updated] FollowUp={self.follow_up_timeout}s | SilenceLimit={self.silence_limit}s | WakeWords={self.wake_words}")
+        print(f"[Settings Updated] Mic='{getattr(self, 'input_device_name', 'Default')}' | FollowUp={self.follow_up_timeout}s | SilenceLimit={self.silence_limit}s | WakeWords={self.wake_words}")
 
     def save_api_key(self, key: str):
         global OPENROUTER_API_KEY
@@ -865,7 +967,9 @@ class FastAgent:
                 except Exception:
                     pass
         except Exception as e:
-            print(f"[Warning] IPC Server bind error: {e}")
+            print(f"[Fatal] IPC Server bind error: {e}. Another instance owns the port. Exiting duplicate process.")
+            self.is_running = False
+            os._exit(0)
         finally:
             try:
                 srv.close()
@@ -1006,9 +1110,13 @@ class FastAgent:
 
         try:
             # Only flush stale mic buffer if starting from a fresh hotkey press (not continuous wake word flow)
-            if not pre_roll_chunks:
-                while self.mic_stream.get_read_available() > 0:
-                    self.mic_stream.read(self.mic_stream.get_read_available(), exception_on_overflow=False)
+            with self.mic_lock:
+                if not pre_roll_chunks and self.mic_stream and not self.mic_stream.is_stopped():
+                    try:
+                        while self.mic_stream.get_read_available() > 0:
+                            self.mic_stream.read(self.mic_stream.get_read_available(), exception_on_overflow=False)
+                    except Exception:
+                        pass
 
             for i in range(max_total_chunks):
                 if self.manual_stop_recording.is_set():
@@ -1017,7 +1125,10 @@ class FastAgent:
                         self.pill.set_state("processing")
                     break
 
-                data = self.mic_stream.read(CHUNK, exception_on_overflow=False)
+                with self.mic_lock:
+                    if not self.mic_stream or self.mic_stream.is_stopped():
+                        break
+                    data = self.mic_stream.read(CHUNK, exception_on_overflow=False)
 
                 audio_data = np.frombuffer(data, dtype=np.int16)
                 volume = np.abs(audio_data).mean()
@@ -1406,8 +1517,10 @@ class FastAgent:
             # Echo prevention
             time.sleep(0.2)
             try:
-                while self.mic_stream.get_read_available() > 0:
-                    self.mic_stream.read(self.mic_stream.get_read_available(), exception_on_overflow=False)
+                with self.mic_lock:
+                    if self.mic_stream and not self.mic_stream.is_stopped():
+                        while self.mic_stream.get_read_available() > 0:
+                            self.mic_stream.read(self.mic_stream.get_read_available(), exception_on_overflow=False)
             except Exception:
                 pass
             if self.oww is not None:
@@ -1632,7 +1745,11 @@ class FastAgent:
         while self.is_running:
             try:
                 if self.wake_word_enabled and not self.is_listening.is_set() and not self.is_speaking.is_set() and not self.is_session_active:
-                    data = self.mic_stream.read(CHUNK, exception_on_overflow=False)
+                    with self.mic_lock:
+                        if not self.mic_stream or self.mic_stream.is_stopped():
+                            time.sleep(0.05)
+                            continue
+                        data = self.mic_stream.read(CHUNK, exception_on_overflow=False)
                     pre_roll.append(data)
                     audio_data = np.frombuffer(data, dtype=np.int16)
                     prediction = self.oww.predict(audio_data)
@@ -1745,9 +1862,17 @@ class FastAgent:
         except Exception:
             pass
         try:
-            self.mic_stream.stop_stream()
-            self.mic_stream.close()
-            self.audio.terminate()
+            with self.mic_lock:
+                if self.mic_stream:
+                    try:
+                        self.mic_stream.stop_stream()
+                        self.mic_stream.close()
+                    except Exception:
+                        pass
+                try:
+                    self.audio.terminate()
+                except Exception:
+                    pass
         except Exception:
             pass
 

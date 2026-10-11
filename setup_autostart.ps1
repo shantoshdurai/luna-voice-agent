@@ -28,7 +28,6 @@ if ($Action -eq "enable") {
     $Shortcut2.TargetPath = $TargetPath
     $Shortcut2.Arguments = $Arguments
     $Shortcut2.WorkingDirectory = $RootDir
-    $Shortcut2.Hotkey = "CTRL+ALT+J"
     $Shortcut2.IconLocation = $IconLocation
     $Shortcut2.Description = "Jarvis AI - Fast Voice Copilot"
     $Shortcut2.Save()
@@ -38,7 +37,6 @@ if ($Action -eq "enable") {
     $Shortcut3.TargetPath = $TargetPath
     $Shortcut3.Arguments = $Arguments
     $Shortcut3.WorkingDirectory = $RootDir
-    $Shortcut3.Hotkey = "CTRL+ALT+J"
     $Shortcut3.IconLocation = $IconLocation
     $Shortcut3.Description = "Jarvis AI - Fast Voice Copilot"
     $Shortcut3.Save()

@@ -52,6 +52,46 @@ def save_history(history: List[Dict[str, Any]]):
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
+
+def get_audio_input_devices() -> List[str]:
+    """Returns clean, deduplicated list of available microphone input devices."""
+    devices = ["Default (System Default)"]
+    try:
+        import pyaudio
+        p = pyaudio.PyAudio()
+        try:
+            seen = set()
+            # Try Host API 0 (MME on Windows) first for friendly names
+            try:
+                mme = p.get_host_api_info_by_index(0)
+                for dev_idx in range(mme.get('deviceCount', 0)):
+                    info = p.get_device_info_by_host_api_device_index(0, dev_idx)
+                    if info.get('maxInputChannels', 0) > 0:
+                        name = info.get('name', '').strip()
+                        if name and name not in seen and not any(k in name.lower() for k in ['mapper', 'primary sound', 'stereo mix']):
+                            seen.add(name)
+                            devices.append(name)
+            except Exception:
+                pass
+            # Fallback if MME gave no input devices
+            if len(devices) == 1:
+                for i in range(p.get_device_count()):
+                    try:
+                        info = p.get_device_info_by_index(i)
+                        if info.get('maxInputChannels', 0) > 0:
+                            name = info.get('name', '').strip()
+                            if name and name not in seen and not any(k in name.lower() for k in ['mapper', 'primary sound', 'stereo mix']):
+                                seen.add(name)
+                                devices.append(name)
+                    except Exception:
+                        continue
+        finally:
+            p.terminate()
+    except Exception:
+        pass
+    return devices
+
+
 DEFAULT_CONFIG = {
     "follow_up_timeout": 8.0,
     "silence_limit": 1.2,
@@ -59,6 +99,7 @@ DEFAULT_CONFIG = {
     "voice_dismissal_enabled": True,
     "wake_word_enabled": True,
     "wake_words": ["hey jarvis", "jarvis"],
+    "input_device_name": "Default (System Default)",
 }
 
 
@@ -379,6 +420,8 @@ class JarvisDashboard:
                 frame.grid(row=1, column=0, sticky="nsew")
                 if name == "memory":
                     self.refresh_memory_view()
+                elif name == "settings":
+                    self._refresh_mic_list()
             else:
                 frame.grid_forget()
 
@@ -1079,9 +1122,62 @@ class JarvisDashboard:
             corner_radius=10
         )
         self.views["settings"] = settings_frame
-        settings_frame.grid_columnconfigure(0, weight=1)
+        # Section 1: Microphone & Audio Input Device
+        s_mic = self._create_settings_section(settings_frame, "Microphone & Audio Input Device")
 
-        # Section 1: Voice Session & Follow-Up Listening
+        row_mic = ctk.CTkFrame(s_mic, fg_color="transparent")
+        row_mic.pack(fill="x", padx=14, pady=(8, 4))
+        ctk.CTkLabel(
+            row_mic,
+            text="Input Microphone:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#f8fafc"
+        ).pack(side="left")
+
+        current_mic = self.config.get("input_device_name", "Default (System Default)")
+        available_mics = get_audio_input_devices()
+        if current_mic not in available_mics:
+            available_mics.insert(0, current_mic)
+
+        self.mic_option_menu = ctk.CTkOptionMenu(
+            row_mic,
+            values=available_mics,
+            command=self._on_mic_device_change,
+            fg_color="#1e293b",
+            button_color="#2563eb",
+            button_hover_color="#1d4ed8",
+            dropdown_fg_color="#0f172a",
+            width=280,
+            height=28
+        )
+        self.mic_option_menu.set(current_mic)
+        self.mic_option_menu.pack(side="right")
+
+        row_mic_sub = ctk.CTkFrame(s_mic, fg_color="transparent")
+        row_mic_sub.pack(fill="x", padx=14, pady=(2, 8))
+
+        short_mic = (current_mic[:35] + "..") if len(current_mic) > 35 else current_mic
+        self.mic_status_label = ctk.CTkLabel(
+            row_mic_sub,
+            text=f"Selected: {short_mic}",
+            font=ctk.CTkFont(size=10),
+            text_color="#64748b"
+        )
+        self.mic_status_label.pack(side="left")
+
+        self.refresh_mic_btn = ctk.CTkButton(
+            row_mic_sub,
+            text="🔄 Refresh Mics",
+            width=90,
+            height=24,
+            font=ctk.CTkFont(size=11),
+            fg_color="#1e293b",
+            hover_color="#334155",
+            command=self._refresh_mic_list
+        )
+        self.refresh_mic_btn.pack(side="right")
+
+        # Section 2: Voice Session & Follow-Up Listening
         s1 = self._create_settings_section(settings_frame, "Voice Conversation & Listening Window")
 
         # Row 1: Follow-up timeout
@@ -1353,6 +1449,27 @@ class JarvisDashboard:
             self._render_wake_word_chips()
             if self.on_update_settings:
                 self.on_update_settings(self.config)
+
+    def _on_mic_device_change(self, choice: str):
+        self.config["input_device_name"] = choice
+        save_config(self.config)
+        if hasattr(self, "mic_status_label"):
+            short_choice = (choice[:35] + "..") if len(choice) > 35 else choice
+            self.mic_status_label.configure(text=f"Selected: {short_choice}")
+        if self.on_update_settings:
+            self.on_update_settings(self.config)
+
+    def _refresh_mic_list(self):
+        new_devs = get_audio_input_devices()
+        curr = self.config.get("input_device_name", "Default (System Default)")
+        if curr not in new_devs:
+            new_devs.insert(0, curr)
+        if hasattr(self, "mic_option_menu"):
+            self.mic_option_menu.configure(values=new_devs)
+            self.mic_option_menu.set(curr)
+        if hasattr(self, "mic_status_label"):
+            short_curr = (curr[:35] + "..") if len(curr) > 35 else curr
+            self.mic_status_label.configure(text=f"Selected: {short_curr}")
 
     def _on_timeout_change(self, value: str):
         try:

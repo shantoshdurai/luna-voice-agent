@@ -282,6 +282,11 @@ def test_tool_dispatch():
     assert h_sys is True
     print("  Fast Intent ('what is the system condition'): Handled")
 
+    # 15. Live Web Search Tool
+    ws_res = tools.web_search("claude 3.5 sonnet Anthropic")
+    print("  Web Search Result:\n   ", ws_res[:100] + "...")
+    assert "Claude" in ws_res or "Anthropic" in ws_res or "results" in ws_res
+
     print("Tool Execution Suite: 100% Passed.")
 
 

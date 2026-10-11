@@ -35,6 +35,11 @@ def ensure_default_desktop():
 # Attach main thread to interactive user desktop before any GUI, SDL, or audio libraries load
 ensure_default_desktop()
 
+try:
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("JarvisAI.VoiceCopilot.App.1")
+except Exception:
+    pass
+
 # Hide console window immediately if not launched with --console
 if "--console" not in sys.argv:
     try:
@@ -87,13 +92,18 @@ def acquire_single_instance_mutex() -> bool:
         if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(0.8)
+                s.settimeout(1.2)
                 s.connect(("127.0.0.1", IPC_PORT))
                 s.sendall(b"SHOW_DASHBOARD\n")
+                try:
+                    s.recv(1024)
+                except Exception:
+                    pass
                 s.close()
-            except Exception:
-                pass
-            return False
+                return False
+            except (ConnectionRefusedError, OSError):
+                # Stale or abandoned mutex; no active agent is listening, so we become primary
+                return True
         return True
     except Exception:
         return True
@@ -203,6 +213,7 @@ VOICE & TTS GUIDELINES:
 - When asked about system condition, hardware telemetry, CPU or GPU usage, or what processes/systems are taking the most memory, call get_system_health.
 - When asked to end, kill, or terminate an app or process, call close_app.
 - When asked what apps or software are installed on the PC, call list_installed_apps.
+- When asked to search the web, check information online, or look up recent models or news (e.g. "check web model of claude opus 5.5"), call web_search.
 - When asked to run terminal commands, inspect files, or read code, use run_command, search_files, read_file, or list_folder_contents.
 - When reporting folder contents, summarize the count and top 3-5 items briefly in 1 conversational sentence. NEVER read long lists of filenames aloud.
 - Never read out code blocks, raw markdown, or long technical logs aloud.
@@ -413,6 +424,23 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Searches the live web for recent information, models, news, documentation, or facts (e.g. 'check web model of claude opus 5.5', 'latest python version').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query string."
+                    }
+                },
+                "required": ["query"]
             }
         }
     },
@@ -653,6 +681,8 @@ def dispatch_tool_call(name: str, args: Dict[str, Any], agent_ref: Optional[Any]
             return tools.open_last_screenshot()
         elif name == "get_system_health":
             return tools.get_system_health()
+        elif name == "web_search":
+            return tools.web_search(args.get("query", ""))
         elif name == "adjust_brightness":
             return tools.adjust_brightness(args.get("action", "set"), args.get("value"))
         elif name == "adjust_volume":
@@ -1426,6 +1456,73 @@ class FastAgent:
             except Exception as e2:
                 return f"Sorry, network error: {e2}", []
 
+    def query_tool_completion(self, user_text: str, assistant_content: str, tool_calls: List[Dict[str, Any]], tool_results: List[str]) -> str:
+        """Second turn of the agent loop: synthesizes the final spoken answer from tool execution outputs."""
+        import memory_manager
+        mem_ctx = memory_manager.get_memory_context_string()
+        sys_content = SYSTEM_PROMPT + (f"\n\n{mem_ctx}" if mem_ctx else "")
+
+        messages = [
+            {"role": "system", "content": sys_content},
+            {"role": "user", "content": user_text},
+            {
+                "role": "assistant",
+                "content": assistant_content or "I have executed the requested tools.",
+                "tool_calls": tool_calls
+            }
+        ]
+
+        for tc, res in zip(tool_calls, tool_results):
+            tc_id = tc.get("id") or f"call_{tc.get('function', {}).get('name', 'tool')}"
+            fn_name = tc.get("function", {}).get("name") or "tool"
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "name": fn_name,
+                "content": str(res)[:3500]
+            })
+
+        req_body = {
+            "model": OPENROUTER_MODEL,
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 250
+        }
+
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/shantoshdurai/Offline-Jarvis-Assistant",
+                "X-Title": "Offline Jarvis Assistant"
+            },
+            data=json.dumps(req_body).encode("utf-8")
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                res_data = json.loads(resp.read().decode("utf-8"))
+            return res_data["choices"][0]["message"].get("content") or ""
+        except Exception as e:
+            print(f"⚠️ Primary completion error ({e}), switching to fallback ({FALLBACK_MODEL})...")
+            req_body["model"] = FALLBACK_MODEL
+            req_fallback = urllib.request.Request(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                data=json.dumps(req_body).encode("utf-8")
+            )
+            try:
+                with urllib.request.urlopen(req_fallback, timeout=10) as resp:
+                    res_data = json.loads(resp.read().decode("utf-8"))
+                return res_data["choices"][0]["message"].get("content") or ""
+            except Exception as e2:
+                print(f"⚠️ [Tool Completion Error]: {e2}")
+                return " ".join([str(r) for r in tool_results if r])
+
     def execute_command_pipeline(self, user_text: str, source: str = "voice", t_stt: float = 0.0):
         """Processes user command, calls LLM & tools, speaks reply, measures latency, and updates dashboard."""
         clean_text = user_text.lower().strip(" .,?!\"'")
@@ -1539,14 +1636,34 @@ class FastAgent:
             content = re.sub(r'<\|[^\|]+\|>', '', content)
             content = re.sub(r'<｜DSML｜[\s\S]*?(?:>|$)', '', content).strip()
 
-        spoken_response = content.strip()
-        if not spoken_response and tool_results:
-            spoken_response = " ".join([r for r in tool_results if r])
-        elif not spoken_response:
-            if executed_tool_name:
-                spoken_response = "I have completed that for you."
+        # 2b. Two-Turn Agent Synthesis Loop
+        info_tools = {
+            "web_search", "run_command", "get_system_health", "search_files",
+            "read_file", "list_folder_contents", "list_installed_apps",
+            "get_installed_games", "inspect_screen"
+        }
+        has_info_tool = any(
+            (tc.get("function", {}).get("name") in info_tools)
+            for tc in tool_calls
+        )
+
+        if tool_calls and has_info_tool:
+            print("⚡ [Agent Loop]: Synthesizing final answer from tool results...")
+            synthesized_answer = self.query_tool_completion(prompt, content, tool_calls, tool_results)
+            if synthesized_answer and synthesized_answer.strip():
+                spoken_response = synthesized_answer.strip()
             else:
-                spoken_response = "I'm standing by. What can I do for you?"
+                spoken_response = " ".join([str(r) for r in tool_results if r])
+        elif tool_calls and tool_results:
+            action_summary = " ".join([str(r) for r in tool_results if r])
+            if not content.strip() or any(p in content.lower() for p in ["i will", "i'll", "let me", "sure, i'll", "pull the"]):
+                spoken_response = action_summary
+            else:
+                spoken_response = f"{content.strip()} {action_summary}".strip()
+        else:
+            spoken_response = content.strip()
+            if not spoken_response:
+                spoken_response = "I have completed that for you." if executed_tool_name else "I'm standing by. What can I do for you?"
 
         # Prepare clean speech for natural TTS voice delivery
         cleaned_speech = clean_spoken_text(spoken_response)

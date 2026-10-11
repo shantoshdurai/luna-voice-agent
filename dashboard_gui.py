@@ -38,6 +38,12 @@ def ensure_default_desktop():
 
 ensure_default_desktop()
 
+try:
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("JarvisAI.VoiceCopilot.App.1")
+except Exception:
+    pass
+
+from PIL import Image, ImageTk
 import customtkinter as ctk
 
 # Configure theme
@@ -242,13 +248,36 @@ class JarvisDashboard:
         self.root.minsize(860, 520)
         self.root.configure(fg_color="#0e0f13")
 
-        # Set Window Icon if available
-        ico_path = os.path.join(BASE_DIR, "jarvis_icon.ico")
-        if os.path.exists(ico_path):
+        # Set Window Icon across Tkinter, Taskbar, and Win32
+        self.ico_path = os.path.join(BASE_DIR, "jarvis_icon.ico")
+        self.png_path = os.path.join(BASE_DIR, "jarvis_icon.png")
+        if os.path.exists(self.ico_path):
             try:
-                self.root.iconbitmap(ico_path)
+                self.root.iconbitmap(self.ico_path)
             except Exception:
                 pass
+        if os.path.exists(self.png_path):
+            try:
+                self._icon_img = Image.open(self.png_path)
+                self._icon_photo = ImageTk.PhotoImage(self._icon_img)
+                self.root.iconphoto(False, self._icon_photo)
+            except Exception:
+                pass
+        try:
+            import win32gui, win32con
+            self.root.update_idletasks()
+            wid = self.root.winfo_id()
+            parent = ctypes.windll.user32.GetParent(wid)
+            hwnd = parent if parent else wid
+            if hwnd and os.path.exists(self.ico_path):
+                sm = win32gui.LoadImage(0, self.ico_path, win32con.IMAGE_ICON, 16, 16, win32con.LR_LOADFROMFILE)
+                lg = win32gui.LoadImage(0, self.ico_path, win32con.IMAGE_ICON, 32, 32, win32con.LR_LOADFROMFILE)
+                if sm:
+                    win32gui.SendMessage(hwnd, win32con.WM_SETICON, win32con.ICON_SMALL, sm)
+                if lg:
+                    win32gui.SendMessage(hwnd, win32con.WM_SETICON, win32con.ICON_BIG, lg)
+        except Exception:
+            pass
 
         # Intercept window close (minimize to tray instead of quitting)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
@@ -283,16 +312,34 @@ class JarvisDashboard:
         self.brand_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.brand_frame.grid(row=0, column=0, padx=18, pady=(20, 16), sticky="w")
 
-        self.logo_badge = ctk.CTkLabel(
-            self.brand_frame,
-            text="⚡",
-            font=ctk.CTkFont(size=20),
-            text_color="#38bdf8",
-            width=32,
-            height=32,
-            fg_color="#1e293b",
-            corner_radius=8
-        )
+        # Load custom app icon for brand header
+        self._brand_logo_img = None
+        if os.path.exists(self.png_path):
+            try:
+                _raw = Image.open(self.png_path)
+                self._brand_logo_img = ctk.CTkImage(light_image=_raw, dark_image=_raw, size=(30, 30))
+            except Exception:
+                self._brand_logo_img = None
+
+        if self._brand_logo_img:
+            self.logo_badge = ctk.CTkLabel(
+                self.brand_frame,
+                text="",
+                image=self._brand_logo_img,
+                width=32,
+                height=32
+            )
+        else:
+            self.logo_badge = ctk.CTkLabel(
+                self.brand_frame,
+                text="⚡",
+                font=ctk.CTkFont(size=20),
+                text_color="#38bdf8",
+                width=32,
+                height=32,
+                fg_color="#1e293b",
+                corner_radius=8
+            )
         self.logo_badge.pack(side="left", padx=(0, 10))
 
         self.title_box = ctk.CTkFrame(self.brand_frame, fg_color="transparent")
@@ -2007,11 +2054,23 @@ class JarvisDashboard:
                     self._render_history_feed()
             except Exception:
                 pass
-            self.root.deiconify()
-            self.root.lift()
-            self.root.attributes("-topmost", True)
-            self.root.after(150, lambda: self.root.attributes("-topmost", False))
-            self.root.focus_force()
+            try:
+                self.root.deiconify()
+                self.root.state("normal")
+                self.root.lift()
+                self.root.attributes("-topmost", True)
+                self.root.after(200, lambda: self.root.attributes("-topmost", False))
+                self.root.focus_force()
+
+                # Force foreground on Windows
+                wid = self.root.winfo_id()
+                parent = ctypes.windll.user32.GetParent(wid)
+                hwnd = parent if parent else wid
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
         self.root.after(0, _do_show)
 
     def hide(self):

@@ -1132,13 +1132,57 @@ def get_system_health():
         else:
             top_items.append(f"{p['name']} ({int(p['mem'])} MB)")
 
+    net_str = ""
+    try:
+        net1 = psutil.net_io_counters()
+        time.sleep(0.08)
+        net2 = psutil.net_io_counters()
+        up_kb = (net2.bytes_sent - net1.bytes_sent) / (1024 * 0.08)
+        down_kb = (net2.bytes_recv - net1.bytes_recv) / (1024 * 0.08)
+        net_str = f"Network LAN: upload is {up_kb:.1f} KB/s, download is {down_kb:.1f} KB/s. "
+    except Exception:
+        pass
+
     top_str = ", ".join(top_items) if top_items else "no heavy processes"
     speech = (
         f"CPU is at {cpu_pct}%, RAM is at {ram_pct}% ({ram_used_gb:.1f} of {ram_total_gb:.1f} GB). "
-        f"{gpu_str}Top apps consuming the most memory are {top_str}. "
+        f"{gpu_str}{net_str}Top apps consuming the most memory are {top_str}. "
         f"Say 'end' followed by the app name if you want me to terminate any of them."
     )
     return speech
+
+def web_search(query):
+    """Searches the live web for recent information, models, news, and facts."""
+    clean_q = (query or "").strip().strip("'\"")
+    if not clean_q:
+        return "Please provide a search query."
+    try:
+        url = "https://www.bing.com/search?q=" + urllib.parse.quote(clean_q)
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9"
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+        snippets = re.findall(r'<p class="b_lineclamp[^"]*"[^>]*>(.*?)</p>', html)
+        clean = [re.sub(r'<[^>]+>', '', s).strip() for s in snippets[:4] if s.strip()]
+        if clean:
+            return "\n".join([f"- {c}" for c in clean])
+    except Exception:
+        pass
+
+    # Wikipedia fallback
+    try:
+        wiki_url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(clean_q.split()[0])
+        req = urllib.request.Request(wiki_url, headers={"User-Agent": "JarvisAssistant/1.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("extract"):
+            return f"- {data.get('extract')}"
+    except Exception:
+        pass
+
+    return f"No quick web results found for '{clean_q}'."
 
 def create_folder(folder_path=""):
     """Creates a new folder or directory."""
@@ -1379,7 +1423,8 @@ AVAILABLE_TOOLS = {
     "run_command": execute_command,
     "browser_control": browser_control,
     "open_last_screenshot": open_last_screenshot,
-    "get_system_health": get_system_health
+    "get_system_health": get_system_health,
+    "web_search": web_search
 }
 
 def parse_and_execute_tool(text):

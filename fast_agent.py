@@ -145,7 +145,7 @@ IPC_PORT = 49155
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash")
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "openrouter/free")
-WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.22"))
+WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.55"))
 
 # Audio settings
 FORMAT = pyaudio.paInt16
@@ -198,6 +198,7 @@ VOICE & TTS GUIDELINES:
 - NEVER include raw URLs (like https://...), query parameters, website links, slashes, or plus signs in spoken replies.
 - MULTI-ACTION COMMANDS: If the user requests multiple actions in a single command (e.g. "set brightness to 100, set sound to 50, and open youtube"), you MUST invoke ALL corresponding tools together in that single turn. NEVER drop actions or try to run raw PowerShell scripts for tasks that have dedicated tools.
 - BRIGHTNESS & VOLUME: Always call adjust_brightness to change or set screen brightness (e.g. 100%), and call adjust_volume to change or set audio volume level (e.g. 50%). Never use run_command or write WMI scripts for brightness or volume.
+- TIMERS, STOPWATCH & ALARMS: Always call clock_control(action='timer'|'stopwatch'|'alarm', duration_seconds=...) to open Windows Clock, set timers, start stopwatches, or manage alarms. NEVER call run_command or write PowerShell sleep scripts for timers or clocks!
 - When asked to close an app, browser, tab, or window, ALWAYS call the close_app tool.
 - When asked to shut down, quit, exit, or stop Jarvis, call exit_jarvis. Never lecture about Terminator or give multi-paragraph options.
 - When asked to shut down the PC or computer, call system_control(action='shutdown_pc').
@@ -213,16 +214,39 @@ VOICE & TTS GUIDELINES:
 - When asked about system condition, hardware telemetry, CPU or GPU usage, or what processes/systems are taking the most memory, call get_system_health.
 - When asked to end, kill, or terminate an app or process, call close_app.
 - When asked what apps or software are installed on the PC, call list_installed_apps.
-- When asked to search the web, check information online, or look up recent models or news (e.g. "check web model of claude opus 5.5"), call web_search.
+- When asked to search the web, check information online, find quotes, facts, people, authors, models, or any general knowledge lookup (e.g. "check web", "search web for ..."), ALWAYS call web_search immediately with a concise search query.
 - When asked to run terminal commands, inspect files, or read code, use run_command, search_files, read_file, or list_folder_contents.
 - When reporting folder contents, summarize the count and top 3-5 items briefly in 1 conversational sentence. NEVER read long lists of filenames aloud.
 - Never read out code blocks, raw markdown, or long technical logs aloud.
-CLARIFICATION & CONFIRMATION:
-- If a user's voice command is ambiguous, incomplete, or you suspect STT misheard words, ask a concise 1-sentence question to confirm what they meant before taking action.
-- If an app name could refer to multiple installed apps, confirm with the user which one they prefer.
+ACTION-FIRST EXECUTION & CONFIRMATION RESOLUTION:
+- ALWAYS EXECUTE ACTIONS FIRST: Never ask multiple confirmation questions. NEVER get stuck in confirmation loops.
+- When the user asks to open, launch, or explore ANY folder, app, or website, IMMEDIATELY call the appropriate tool.
+- When asked to open or explore a game or app folder (such as Minecraft, TLauncher, or .minecraft), ALWAYS call open_folder with the target (e.g. open_folder(folder_path='minecraft')).
+- If the user says "open it", "open that", "do it", "yes", "i want it to open it", "sure", or "go ahead", IMMEDIATELY inspect the recent conversation history to identify the pending action, app, or folder, and call the tool immediately. NEVER ask for confirmation again!
 """
 
 TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "clock_control",
+            "description": "Control native Windows Clock app for timers, stopwatch, alarms, and world clock. Opens the native Windows Clock app directly without command-line scripts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Action: 'timer', 'stopwatch', 'alarm', 'clock'."
+                    },
+                    "duration_seconds": {
+                        "type": "number",
+                        "description": "Optional duration in seconds (e.g. 300 for 5 minutes)."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -713,6 +737,11 @@ def dispatch_tool_call(name: str, args: Dict[str, Any], agent_ref: Optional[Any]
                 subprocess.Popen(["shutdown", "/a"])
                 return "Computer shutdown cancelled."
             return f"Unknown system action: {act}"
+        elif name == "clock_control":
+            return tools.clock_control(
+                action=args.get("action", "timer"),
+                duration_seconds=args.get("duration_seconds")
+            )
         elif name == "run_command":
             return tools.execute_command(args.get("command", ""))
         elif name == "search_files":
@@ -767,9 +796,11 @@ def clean_spoken_text(text: str) -> str:
         return ""
     s = text.strip()
     # 0. Strip raw LLM markup or special tokens (such as DeepSeek DSML tags)
-    s = re.sub(r'<｜[^｜]+｜>', '', s)
-    s = re.sub(r'<\|[^\|]+\|>', '', s)
-    s = re.sub(r'<｜DSML｜[\s\S]*?(?:>|$)', '', s)
+    s = re.sub(r'<\s*[|｜][\s\S]*?[|｜]\s*>', '', s)
+    s = re.sub(r'<\s*[|｜]\s*DSML\s*[|｜][\s\S]*?(?:>|$)', '', s)
+    s = re.sub(r'<\s*/\s*invoke\s*>', '', s)
+    s = re.sub(r'<\s*/\s*calls\s*>', '', s)
+    s = re.sub(r'<\s*[|｜]\s*parameter\b[\s\S]*?>', '', s)
 
     # 0a. Summarize multi-item folder listings so TTS does not read hundreds of filenames aloud
     if s.startswith("Contents of ") or "items total):" in s:
@@ -847,8 +878,9 @@ class FastAgent:
 
         # Load persistent configuration
         self.config = load_config()
+        self.listening_mode = self.config.get("listening_mode", "toggle")
         self.follow_up_timeout = float(self.config.get("follow_up_timeout", 8.0))
-        self.silence_limit = float(self.config.get("silence_limit", 1.2))
+        self.silence_limit = float(self.config.get("silence_limit", 2.0))
         self.sfx_enabled = bool(self.config.get("sfx_enabled", True))
         self.voice_dismissal_enabled = bool(self.config.get("voice_dismissal_enabled", True))
         self.wake_word_enabled = bool(self.config.get("wake_word_enabled", True))
@@ -1067,8 +1099,9 @@ class FastAgent:
 
     def on_update_settings(self, new_cfg: Dict[str, Any]):
         self.config.update(new_cfg)
+        self.listening_mode = self.config.get("listening_mode", "toggle")
         self.follow_up_timeout = float(self.config.get("follow_up_timeout", 8.0))
-        self.silence_limit = float(self.config.get("silence_limit", 1.2))
+        self.silence_limit = float(self.config.get("silence_limit", 2.0))
         self.sfx_enabled = bool(self.config.get("sfx_enabled", True))
         if self.pill:
             self.pill.sfx_enabled = self.sfx_enabled
@@ -1248,37 +1281,41 @@ class FastAgent:
     def record_audio(
         self,
         pre_roll_chunks: Optional[List[bytes]] = None,
-        max_duration: float = 12.0,
+        max_duration: float = 60.0,
         silence_limit: Optional[float] = None,
-        start_timeout: Optional[float] = None
+        start_timeout: Optional[float] = None,
+        is_toggle_mode: Optional[bool] = None
     ) -> np.ndarray:
         """Records voice with live waveform equalizer on floating pill, adaptive conversational pause,
-        and manual toggle-to-stop control. Retains pre_roll_chunks for continuous wake word flows.
+        and manual toggle-to-stop control. In Toggle mode, records continuously until toggled off.
         """
         if silence_limit is None:
             silence_limit = self.silence_limit
         if start_timeout is None:
             start_timeout = self.follow_up_timeout
+        if is_toggle_mode is None:
+            is_toggle_mode = (self.listening_mode == "toggle") and (pre_roll_chunks is None)
 
         self.is_recording_active = True
         self.manual_stop_recording.clear()
         if hasattr(self, "dashboard") and self.dashboard:
             self.dashboard.set_recording_state(True)
 
-        frames = list(pre_roll_chunks) if pre_roll_chunks else []
+        frames = []
         silent_chunks = 0
         chunks_per_sec = RATE / CHUNK
         max_total_chunks = int(max_duration * chunks_per_sec)
         timeout_chunks = int(start_timeout * chunks_per_sec)
-        talking_started = bool(pre_roll_chunks and len(pre_roll_chunks) > 0)
+        talking_started = False
         talking_start_chunk = 0
+        stored_pre_roll = list(pre_roll_chunks) if pre_roll_chunks else []
 
         # Ring buffer for preserving initial pre-speech syllable without accumulating ambient room noise
         silence_pre_buffer = collections.deque(maxlen=4)
         consecutive_speech_chunks = 0
 
         if self.pill:
-            self.pill.set_state("recording")
+            self.pill.set_state("listening")
 
         try:
             # Only flush stale mic buffer if starting from a fresh hotkey press (not continuous wake word flow)
@@ -1292,7 +1329,7 @@ class FastAgent:
 
             for i in range(max_total_chunks):
                 if self.manual_stop_recording.is_set():
-                    print("[Manual Stop] User stopped recording via button/hotkey.")
+                    print("[Manual Stop] User stopped recording via button/hotkey toggle.")
                     if self.pill:
                         self.pill.set_state("processing")
                     break
@@ -1310,42 +1347,66 @@ class FastAgent:
                     norm = min(1.0, max(0.0, (volume - self.noise_floor) / max(600, self.speech_threshold - self.noise_floor + 200)))
                     self.pill.update_volume(norm)
 
-                if not talking_started:
-                    if volume > self.speech_threshold:
-                        consecutive_speech_chunks += 1
-                        # Require 2 consecutive speech chunks (~64ms) to confirm genuine voice (rejects transient clicks/breaths)
-                        if consecutive_speech_chunks >= 2:
-                            talking_started = True
-                            talking_start_chunk = i
-                            frames = list(silence_pre_buffer)
-                            frames.append(data)
-                            silent_chunks = 0
-                    else:
-                        consecutive_speech_chunks = 0
-                        silence_pre_buffer.append(data)
-
-                    if i > timeout_chunks:
-                        # Timeout reached with no genuine speech detected -> return empty audio
-                        break
-                else:
+                if is_toggle_mode:
+                    # ==========================================
+                    # TOGGLE MODE: Continuous Recording
+                    # User speaks at their own pace without premature silence cutoffs.
+                    # Stops when hotkey or button is pressed again.
+                    # ==========================================
                     frames.append(data)
                     if volume > self.speech_threshold:
-                        silent_chunks = 0
+                        talking_started = True
+                        if self.pill and self.pill.state != "recording":
+                            self.pill.set_state("recording")
+                else:
+                    # ==========================================
+                    # AUTO-SILENCE (VAD) MODE
+                    # ==========================================
+                    if not talking_started:
+                        if volume > self.speech_threshold:
+                            consecutive_speech_chunks += 1
+                            # Require 2 consecutive speech chunks (~64ms) to confirm genuine voice
+                            if consecutive_speech_chunks >= 2:
+                                talking_started = True
+                                talking_start_chunk = i
+                                if self.pill:
+                                    self.pill.set_state("recording")
+                                if stored_pre_roll and i <= 6:
+                                    frames = list(stored_pre_roll) + list(silence_pre_buffer) + [data]
+                                else:
+                                    frames = list(silence_pre_buffer) + [data]
+                                silent_chunks = 0
+                        else:
+                            consecutive_speech_chunks = 0
+                            silence_pre_buffer.append(data)
+
+                        if i > timeout_chunks:
+                            # Timeout reached with no genuine speech detected -> return empty audio
+                            break
                     else:
-                        silent_chunks += 1
+                        frames.append(data)
+                        if volume > self.speech_threshold:
+                            silent_chunks = 0
+                        else:
+                            silent_chunks += 1
 
-                    # Adaptive conversational pause: once speech has been going on for > 1.0s,
-                    # extend the silence window slightly (e.g. 1.4s) to allow natural breathing/thought pauses
-                    spoken_duration = (i - talking_start_chunk) * (CHUNK / RATE)
-                    effective_silence = max(silence_limit, 1.4) if spoken_duration > 1.0 else silence_limit
-                    if silent_chunks > int(effective_silence * chunks_per_sec):
-                        # Silence detected! Transition immediately to processing state
-                        if self.pill:
-                            self.pill.set_state("processing")
-                        break
+                        # Adaptive conversational pause: extend pause window for natural breathing/thought pauses
+                        spoken_duration = (i - talking_start_chunk) * (CHUNK / RATE)
+                        effective_silence = max(silence_limit, 2.0) if spoken_duration > 1.0 else silence_limit
+                        if silent_chunks > int(effective_silence * chunks_per_sec):
+                            # Silence detected! Transition immediately to processing state
+                            if self.pill:
+                                self.pill.set_state("processing")
+                            break
 
-            if not talking_started or not frames:
+            if not frames:
                 return np.zeros(0, dtype=np.int16)
+
+            if is_toggle_mode and not talking_started:
+                # In toggle mode, if no speech volume exceeded threshold throughout the session
+                avg_vol = np.mean([np.abs(np.frombuffer(f, dtype=np.int16)).mean() for f in frames]) if frames else 0
+                if avg_vol < self.noise_floor * 1.2:
+                    return np.zeros(0, dtype=np.int16)
 
             return np.concatenate([np.frombuffer(f, dtype=np.int16) for f in frames])
         finally:
@@ -1357,44 +1418,67 @@ class FastAgent:
                 self.dashboard.set_recording_state(False)
 
     def transcribe(self, audio_data: np.ndarray) -> str:
-        """Transcribe speech using dedicated NVIDIA Parakeet-TDT (622MB) engine."""
+        """Transcribe speech using dedicated NVIDIA Parakeet-TDT (622MB) engine with OpenWhispr RMS gating."""
         if len(audio_data) < RATE * 0.4:
             return ""
 
-        # Parakeet-TDT or Parakeet-EOU
+        # OpenWhispr RMS Silence Gating (ffmpegUtils.js computeFloat32RMS)
+        if audio_data.dtype == np.int16:
+            samples_f = audio_data.astype(np.float32) / 32768.0
+        else:
+            samples_f = audio_data.astype(np.float32)
+        rms = float(np.sqrt(np.mean(samples_f ** 2)))
+
+        # SILENCE_RMS_THRESHOLD = 0.001 (matching OpenWhispr parakeetServer.js)
+        # Prevents dead air from reaching decoders and eliminates silence hallucinations
+        if rms < 0.001:
+            print(f"[STT Gating] Audio RMS ({rms:.5f}) below silence threshold (0.001) -> Skipped dead air")
+            return ""
+
+        # NVIDIA Parakeet-TDT 0.6B Engine
         if self.stt is not None:
             try:
                 t0 = time.time()
                 text = self.stt.transcribe(audio_data)
-                if text.strip():
+                if text and text.strip():
                     model_name = self.stt.__class__.__name__
-                    print(f"⚡ STT ({model_name}): \"{text.strip()}\" ({time.time()-t0:.2f}s)")
+                    print(f"⚡ STT ({model_name}): \"{text.strip()}\" ({time.time()-t0:.2f}s, rms={rms:.4f})")
                     return text.strip()
+
+                # OpenWhispr Single-Retry on non-silent audio (#1435)
+                # "The RMS gate above already established audible audio, so an empty decode here
+                # loses the whole dictation — retry once before giving up."
+                text_retry = self.stt.transcribe(audio_data)
+                if text_retry and text_retry.strip():
+                    print(f"⚡ STT (Parakeet Retry): \"{text_retry.strip()}\" ({time.time()-t0:.2f}s)")
+                    return text_retry.strip()
+                return ""
             except Exception as e:
                 print(f"[Notice] STT inference error: {e}")
 
-        # Whisper fallback
-        try:
-            whisper = self.get_whisper()
-            import tempfile, wave
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
-                wav_path = tf.name
-            with wave.open(wav_path, "wb") as wf:
-                wf.setnchannels(CHANNELS)
-                wf.setsampwidth(self.audio.get_sample_size(FORMAT))
-                wf.setframerate(RATE)
-                wf.writeframes(audio_data.tobytes())
-
-            segments, _ = whisper.transcribe(wav_path, beam_size=1)
-            whisper_text = "".join([s.text for s in segments]).strip()
+        # Whisper fallback: ONLY if Parakeet is completely missing/uninitialized
+        if self.stt is None:
             try:
-                os.remove(wav_path)
+                whisper = self.get_whisper()
+                import tempfile, wave
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                    wav_path = tf.name
+                with wave.open(wav_path, "wb") as wf:
+                    wf.setnchannels(CHANNELS)
+                    wf.setsampwidth(self.audio.get_sample_size(FORMAT))
+                    wf.setframerate(RATE)
+                    wf.writeframes(audio_data.tobytes())
+
+                segments, _ = whisper.transcribe(wav_path, beam_size=1)
+                whisper_text = "".join([s.text for s in segments]).strip()
+                try:
+                    os.remove(wav_path)
+                except Exception:
+                    pass
+                if whisper_text:
+                    return whisper_text
             except Exception:
                 pass
-            if whisper_text:
-                return whisper_text
-        except Exception:
-            pass
 
         return ""
 
@@ -1416,7 +1500,8 @@ class FastAgent:
             "messages": messages_payload,
             "tools": TOOL_DEFINITIONS,
             "temperature": 0.3,
-            "max_tokens": 300
+            "max_tokens": 1000,
+            "reasoning": {"effort": "none"}
         }
 
         req = urllib.request.Request(
@@ -1436,10 +1521,17 @@ class FastAgent:
             choice = res["choices"][0]["message"]
             content = choice.get("content") or ""
             tool_calls = choice.get("tool_calls") or []
+
+            # Guard: If reasoning consumed all tokens and produced no content or tool calls, switch to fallback
+            if not content and not tool_calls and choice.get("reasoning"):
+                print("⚡ [Warning]: Model spent tokens on reasoning without content. Switching to fallback...")
+                raise RuntimeError("Model spent tokens on reasoning without content")
+
             return content, tool_calls
         except Exception as e:
             print(f"⚠️ Primary model error ({e}), switching to fallback ({FALLBACK_MODEL})...")
             req_body["model"] = FALLBACK_MODEL
+            req_body["max_tokens"] = 1000
             req_fallback = urllib.request.Request(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
@@ -1461,6 +1553,7 @@ class FastAgent:
         import memory_manager
         mem_ctx = memory_manager.get_memory_context_string()
         sys_content = SYSTEM_PROMPT + (f"\n\n{mem_ctx}" if mem_ctx else "")
+        sys_content += "\n\nCRITICAL: You are now in the FINAL ANSWER synthesis step. Based on the tool results provided, give the user their final answer directly and conversationally in 1 to 3 clear spoken sentences. Answer who they are, quotes, or details directly. NEVER output code, tool markup, or DSML tags."
 
         messages = [
             {"role": "system", "content": sys_content},
@@ -1486,7 +1579,8 @@ class FastAgent:
             "model": OPENROUTER_MODEL,
             "messages": messages,
             "temperature": 0.3,
-            "max_tokens": 250
+            "max_tokens": 600,
+            "reasoning": {"effort": "none"}
         }
 
         req = urllib.request.Request(
@@ -1507,6 +1601,7 @@ class FastAgent:
         except Exception as e:
             print(f"⚠️ Primary completion error ({e}), switching to fallback ({FALLBACK_MODEL})...")
             req_body["model"] = FALLBACK_MODEL
+            req_body["max_tokens"] = 600
             req_fallback = urllib.request.Request(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
@@ -1542,6 +1637,31 @@ class FastAgent:
                     clean_text = remainder
                 break
 
+        # Pure wake word / greeting acknowledgment (e.g. user said "hey jarvis", "luna", "harry" and paused for assistant to answer)
+        greeting_words = {"hey jarvis", "jarvis", "hello jarvis", "hi jarvis", "ok jarvis", "okay jarvis", "hey jarvis please", "yes jarvis"}
+        is_pure_wake = (clean_text in greeting_words) or any(
+            clean_text == ww or clean_text in (f"hey {ww}", f"hi {ww}", f"hello {ww}", f"ok {ww}", f"okay {ww}")
+            for ww in self.wake_words
+        ) or bool(re.match(r'^(?:hey\s+|hello\s+|hi\s+|ok\s+|okay\s+)?jarvis(?:\s+please)?$', clean_text))
+
+        if is_pure_wake:
+            greeting_msg = "I'm listening, Shantosh."
+            t_tts = float(self.tts_speak(greeting_msg) or 0.0)
+            t_total = float(t_stt) + t_tts
+            try:
+                self.dashboard.add_interaction(
+                    user_text=user_text,
+                    response=greeting_msg,
+                    source=source,
+                    tool="greeting",
+                    latency={"total": round(t_total, 2), "stt": round(float(t_stt), 2), "llm": 0.0, "tool": 0.0, "tts": round(t_tts, 2)}
+                )
+            except Exception as e:
+                print(f"[Dashboard Update Error]: {e}")
+            if self.pill:
+                self.pill.set_state("listening")
+            return "greeting"
+
         if self.is_dismissal_command(clean_text):
             try:
                 t_tts = float(self.tts_speak("Standing by.") or 0.0)
@@ -1567,6 +1687,43 @@ class FastAgent:
 
         prompt = f"[Voice Input]: {user_text}" if source == "voice" else f"[Typed Input]: {user_text}"
 
+        # Follow-up Confirmation Intent Resolver (e.g. "i want it to open it", "open it", "open that", "yes open it", "do it")
+        confirm_patterns = [
+            r'^(?:yes\s*,?\s*)?(?:i\s+want\s+)?(?:it\s+to\s+)?open(?:\s+it|\s+that)?$',
+            r'^(?:yes\s*,?\s*)?(?:do\s+it|open\s+it|open\s+that|go\s+ahead|please\s+open\s+it)$',
+            r'^(?:yes\s+please|yes\s+do\s+it|sure\s+open\s+it|yes\s+i\s+want\s+it\s+to\s+open)$'
+        ]
+        if any(re.match(pat, clean_text) for pat in confirm_patterns):
+            last_asst = ""
+            for msg in reversed(self.history):
+                if msg.get("role") == "assistant":
+                    last_asst = msg.get("content", "")
+                    break
+            if last_asst:
+                m_folder = re.search(r'(?:open\s+(?:your\s+)?([A-Za-z0-9_\s]+?)\s+folder)', last_asst, re.IGNORECASE)
+                if m_folder:
+                    f_name = m_folder.group(1).strip()
+                    res = tools.open_folder(f_name)
+                    p, display_name = tools.resolve_folder_path(f_name)
+                    speech = f"Opening your {display_name} folder for you."
+                    t_tts = float(self.tts_speak(speech) or 0.0)
+                    t_total = float(t_stt) + t_tts
+                    try:
+                        self.dashboard.add_interaction(
+                            user_text=user_text,
+                            response=speech,
+                            source=source,
+                            tool="open_folder",
+                            latency={"total": round(t_total, 2), "stt": round(float(t_stt), 2), "llm": 0.0, "tool": 0.01, "tts": round(t_tts, 2)}
+                        )
+                    except Exception as e_dash:
+                        print(f"[Dashboard Update Error]: {e_dash}")
+                    self.history.append({"role": "user", "content": prompt})
+                    self.history.append({"role": "assistant", "content": speech})
+                    if self.pill:
+                        self.pill.set_state("idle")
+                    return "open_folder"
+
         # Fast System Agent Interceptor (Instant Sub-50ms Local Execution)
         try:
             handled, action_msg, response_speech, needs_llm = tools.detect_and_run_intent(clean_text)
@@ -1587,7 +1744,7 @@ class FastAgent:
                 self.history.append({"role": "assistant", "content": response_speech})
                 if self.pill:
                     self.pill.set_state("idle")
-                return
+                return action_msg.split(":")[0].strip("[]") if action_msg else "fast_system_agent"
             elif handled and needs_llm:
                 prompt += f"\n\n[Active Screen Context]:\n{action_msg}"
         except Exception as e_intent:
@@ -1621,20 +1778,32 @@ class FastAgent:
         t_tool = time.time() - t0_tool
 
         # Check if model returned tool call markup directly in content (leaked DSML)
-        if ("<｜DSML｜" in content or "<|DSML|>" in content) and not tool_calls:
-            m_func = re.search(r'invoke name="([^"]+)"', content)
+        has_dsml = bool(re.search(r'<\s*[|｜]\s*DSML\s*[|｜]', content, re.IGNORECASE))
+        if has_dsml and not tool_calls:
+            m_func = re.search(r'invoke\s+name="([^"]+)"', content)
             if m_func:
                 leaked_name = m_func.group(1).strip()
                 leaked_args = {}
-                for m_arg in re.finditer(r'parameter name="([^"]+)"(?: string="true")?>([\s\S]*?)</', content):
+                for m_arg in re.finditer(r'parameter\s+name="([^"]+)"(?: string="true")?>([\s\S]*?)</', content):
                     leaked_args[m_arg.group(1).strip()] = m_arg.group(2).strip()
                 print(f"⚡ [Recovered Leaked DSML Tool]: {leaked_name}({leaked_args})")
                 res = dispatch_tool_call(leaked_name, leaked_args, agent_ref=self)
                 tool_results.append(res)
                 executed_tool_name = leaked_name
-            content = re.sub(r'<｜[^｜]+｜>', '', content)
-            content = re.sub(r'<\|[^\|]+\|>', '', content)
-            content = re.sub(r'<｜DSML｜[\s\S]*?(?:>|$)', '', content).strip()
+                # Ensure tool_calls is populated so two-turn synthesis generates the spoken answer
+                tool_calls = [{
+                    "id": "call_recovered_dsml",
+                    "type": "function",
+                    "function": {
+                        "name": leaked_name,
+                        "arguments": json.dumps(leaked_args)
+                    }
+                }]
+            content = re.sub(r'<\s*[|｜][\s\S]*?[|｜]\s*>', '', content)
+            content = re.sub(r'<\s*[|｜]\s*DSML\s*[|｜][\s\S]*?(?:>|$)', '', content)
+            content = re.sub(r'<\s*/\s*invoke\s*>', '', content)
+            content = re.sub(r'<\s*/\s*calls\s*>', '', content)
+            content = re.sub(r'<\s*[|｜]\s*parameter\b[\s\S]*?>', '', content).strip()
 
         # 2b. Two-Turn Agent Synthesis Loop
         info_tools = {
@@ -1661,9 +1830,24 @@ class FastAgent:
             else:
                 spoken_response = f"{content.strip()} {action_summary}".strip()
         else:
-            spoken_response = content.strip()
-            if not spoken_response:
+            clean_c = re.sub(r'<\s*[|｜][\s\S]*?[|｜]\s*>', '', content)
+            clean_c = re.sub(r'<\s*[|｜]\s*DSML\s*[|｜][\s\S]*?(?:>|$)', '', clean_c)
+            clean_c = re.sub(r'<\s*/\s*(?:invoke|calls)\s*>', '', clean_c)
+            clean_c = re.sub(r'<\s*[|｜]\s*parameter\b[\s\S]*?>', '', clean_c).strip()
+            if tool_results:
+                spoken_response = " ".join([str(r) for r in tool_results if r])
+            elif clean_c:
+                spoken_response = clean_c
+            else:
                 spoken_response = "I have completed that for you." if executed_tool_name else "I'm standing by. What can I do for you?"
+
+        # 2c. Uniformly strip any residual leaked markup or DSML tags from spoken_response
+        spoken_response = re.sub(r'<\s*[|｜][\s\S]*?[|｜]\s*>', '', spoken_response)
+        spoken_response = re.sub(r'<\s*[|｜]\s*DSML\s*[|｜][\s\S]*?(?:>|$)', '', spoken_response)
+        spoken_response = re.sub(r'<\s*/\s*(?:invoke|calls)\s*>', '', spoken_response)
+        spoken_response = re.sub(r'<\s*[|｜]\s*parameter\b[\s\S]*?>', '', spoken_response).strip()
+        if not spoken_response:
+            spoken_response = "I have completed that for you." if executed_tool_name else "I'm standing by. What can I do for you?"
 
         # Prepare clean speech for natural TTS voice delivery
         cleaned_speech = clean_spoken_text(spoken_response)
@@ -1950,13 +2134,17 @@ class FastAgent:
                 self.pill.set_state("listening")
 
             current_pre_roll = pre_roll_chunks if turn == 1 else None
-            start_to = max(5.0, self.follow_up_timeout) if turn == 1 else self.follow_up_timeout
+            start_to = max(5.0, self.follow_up_timeout) if turn == 1 else max(4.0, self.follow_up_timeout)
+
+            # In Toggle mode, turn 1 of PTT recording runs continuously without premature silence cutoff
+            use_toggle = (self.listening_mode == "toggle") and (turn == 1 and current_pre_roll is None)
 
             audio_data = self.record_audio(
                 pre_roll_chunks=current_pre_roll,
-                max_duration=12.0,
+                max_duration=60.0 if use_toggle else 45.0,
                 silence_limit=self.silence_limit,
-                start_timeout=start_to
+                start_timeout=start_to,
+                is_toggle_mode=use_toggle
             )
 
             if len(audio_data) == 0:
@@ -2004,14 +2192,13 @@ class FastAgent:
             # Execute normal command
             executed_tool = self.execute_command_pipeline(user_text, source="voice", t_stt=t_stt)
 
-            # If Push-to-Talk or if an action tool was executed, finish immediately
-            # (Stops Jarvis from lingering in follow-up mode and generating unwanted phantom responses)
-            if pre_roll_chunks is None or executed_tool:
-                break
+            # If user just gave a wake-word greeting, stay in listening mode for their follow-up command
+            if executed_tool == "greeting":
+                continue
 
-            # If follow up timeout is 0 (Off), finish turn immediately
-            if self.follow_up_timeout <= 0.0:
-                break
+            # Otherwise, always finish turn immediately and return to standby sleep
+            # (Model never lingers in listening mode after delivering a response)
+            break
 
         # Terminate session & enter standby sleep
         self.is_session_active = False
@@ -2023,13 +2210,24 @@ class FastAgent:
 
     def _wake_word_listener(self):
         """Continuous mic listening for configured wake words with pre-roll buffer for continuous speech flow."""
-        if self.oww is None:
-            return
-
         pre_roll = collections.deque(maxlen=16)  # ~1.28s audio history at 16kHz
+        speech_chunks = []
+        silence_count = 0
+        in_speech = False
+        last_session_end = 0.0
+
+        oww_models_map = ("jarvis", "alexa", "mycroft", "weather", "timer")
+
         while self.is_running:
             try:
-                if self.wake_word_enabled and not self.is_listening.is_set() and not self.is_speaking.is_set() and not self.is_session_active:
+                # Standby check with 1.0s cooldown after session ends to prevent sleep chime / mouse click re-triggering
+                if (
+                    self.wake_word_enabled
+                    and not self.is_listening.is_set()
+                    and not self.is_speaking.is_set()
+                    and not self.is_session_active
+                    and (time.time() - last_session_end > 1.0)
+                ):
                     with self.mic_lock:
                         if not self.mic_stream or self.mic_stream.is_stopped():
                             time.sleep(0.05)
@@ -2037,17 +2235,79 @@ class FastAgent:
                         data = self.mic_stream.read(CHUNK, exception_on_overflow=False)
                     pre_roll.append(data)
                     audio_data = np.frombuffer(data, dtype=np.int16)
-                    prediction = self.oww.predict(audio_data)
-                    score = max(prediction.values()) if prediction else 0.0
+
+                    # 1. OpenWakeWord check (for trained models: hey_jarvis, alexa, etc.)
+                    score = 0.0
+                    if self.oww is not None:
+                        try:
+                            prediction = self.oww.predict(audio_data)
+                            score = max(prediction.values()) if prediction else 0.0
+                        except Exception:
+                            score = 0.0
 
                     if score > WAKE_THRESHOLD:
-                        print(f"\n[Wake Word Detected (score={score:.2f})]")
-                        self.oww.reset()
+                        print(f"\n[Wake Word Detected via OpenWakeWord (score={score:.2f})]")
+                        if self.oww is not None:
+                            self.oww.reset()
                         self.is_listening.set()
+                        last_session_end = time.time()
                         captured_pre_roll = list(pre_roll)
                         pre_roll.clear()
+                        speech_chunks.clear()
+                        in_speech = False
                         self.command_queue.put(("WAKE_TRIGGER", captured_pre_roll))
+                        continue
+
+                    # 2. Dynamic Speech Wake Word Detector (for custom wake words: luna, lunu, harry, etc.)
+                    custom_wws = [w for w in self.wake_words if not any(k in w for k in oww_models_map)]
+                    if custom_wws and self.stt is not None:
+                        vol = float(np.abs(audio_data).mean())
+                        thresh = getattr(self, "speech_threshold", 800) or 800
+                        is_speech = vol > thresh
+
+                        if is_speech:
+                            in_speech = True
+                            silence_count = 0
+                            speech_chunks.append(data)
+                        elif in_speech:
+                            silence_count += 1
+                            speech_chunks.append(data)
+                            # After ~240ms of trailing silence (3 chunks) or ~1.6s speech burst (20 chunks)
+                            if silence_count >= 3 or len(speech_chunks) >= 20:
+                                in_speech = False
+                                silence_count = 0
+                                if len(speech_chunks) >= 4:  # At least 320ms audio
+                                    all_bytes = b"".join(speech_chunks)
+                                    samples = np.frombuffer(all_bytes, dtype=np.int16)
+                                    try:
+                                        t_text = self.stt.transcribe(samples).lower().strip(" .,?!\"'")
+                                        if t_text:
+                                            # Match any configured custom wake word
+                                            matched = None
+                                            for cww in self.wake_words:
+                                                if re.search(r'\b' + re.escape(cww) + r'\b', t_text):
+                                                    matched = cww
+                                                    break
+                                            if matched:
+                                                print(f"\n[Custom Wake Word Detected: '{matched}' in '{t_text}']")
+                                                if self.oww is not None:
+                                                    self.oww.reset()
+                                                self.is_listening.set()
+                                                last_session_end = time.time()
+                                                full_pre = list(pre_roll) + speech_chunks
+                                                pre_roll.clear()
+                                                speech_chunks.clear()
+                                                self.command_queue.put(("WAKE_TRIGGER", full_pre))
+                                                continue
+                                    except Exception:
+                                        pass
+                                speech_chunks.clear()
+                        else:
+                            if len(speech_chunks) > 0:
+                                speech_chunks.clear()
                 else:
+                    if self.is_listening.is_set() or self.is_session_active or self.is_speaking.is_set():
+                        last_session_end = time.time()
                     time.sleep(0.08)
             except OSError:
                 break

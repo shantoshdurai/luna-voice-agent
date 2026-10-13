@@ -9,7 +9,6 @@ Features:
 import os
 import json
 import numpy as np
-import onnxruntime as ort
 from typing import Optional, Tuple, List, Generator, Callable
 
 
@@ -118,6 +117,7 @@ class ParakeetEOU:
         if not os.path.exists(enc_path):
             raise FileNotFoundError(f"Missing model file: {enc_path}. Run download_parakeet.py to install.")
 
+        import onnxruntime as ort
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 4
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL

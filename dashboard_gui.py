@@ -180,8 +180,9 @@ def find_audio_device_index(p, device_name: Optional[str], is_input: bool = True
 
 
 DEFAULT_CONFIG = {
+    "listening_mode": "toggle",
     "follow_up_timeout": 8.0,
-    "silence_limit": 1.2,
+    "silence_limit": 2.0,
     "sfx_enabled": True,
     "voice_dismissal_enabled": True,
     "wake_word_enabled": True,
@@ -489,16 +490,19 @@ class JarvisDashboard:
     def set_recording_state(self, active: bool):
         """Updates PTT button appearance dynamically when recording vs idle."""
         self._is_recording = active
+        mode = self.config.get("listening_mode", "toggle")
         def _update():
             if active:
+                btn_text = "⏹️  Stop & Process (Click or Press Key)" if mode == "toggle" else "🛑  Stop Speaking (Click to Finish)"
                 self.header_ptt_btn.configure(
-                    text="🛑  Stop Speaking (Click to Finish)",
+                    text=btn_text,
                     fg_color="#dc2626",
                     hover_color="#b91c1c"
                 )
             else:
+                btn_text = "🎙️  Start Listening (Ctrl+Shift+Space)" if mode == "toggle" else "🎙️  Push to Talk (Ctrl+Shift+Space)"
                 self.header_ptt_btn.configure(
-                    text="🎙️  Push to Talk (Ctrl+Shift+Space)",
+                    text=btn_text,
                     fg_color="#2563eb",
                     hover_color="#1d4ed8"
                 )
@@ -1445,9 +1449,33 @@ class JarvisDashboard:
         # Section 2: Voice Session & Follow-Up Listening
         s1 = self._create_settings_section(settings_frame, "Voice Conversation & Listening Window")
 
+        # Row 0: Listening Mode (Toggle vs Auto-Silence VAD)
+        row0 = ctk.CTkFrame(s1, fg_color="transparent")
+        row0.pack(fill="x", padx=14, pady=(8, 2))
+        ctk.CTkLabel(row0, text="Listening Mode:", font=ctk.CTkFont(size=12, weight="bold"), text_color="#f8fafc").pack(side="left")
+
+        curr_mode = self.config.get("listening_mode", "toggle")
+        curr_mode_label = "Toggle (Press to Start/Stop)" if curr_mode == "toggle" else "Auto-Silence (VAD)"
+        self.mode_seg = ctk.CTkSegmentedButton(
+            row0,
+            values=["Toggle (Press to Start/Stop)", "Auto-Silence (VAD)"],
+            command=self._on_listening_mode_change,
+            selected_color="#2563eb",
+            height=28
+        )
+        self.mode_seg.set(curr_mode_label)
+        self.mode_seg.pack(side="right")
+
+        ctk.CTkLabel(
+            s1,
+            text="Toggle mode keeps mic open continuously until you press the key/button again (no cutting off mid-speech). Auto-Silence stops on natural pauses.",
+            font=ctk.CTkFont(size=10),
+            text_color="#64748b"
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
         # Row 1: Follow-up timeout
         row1 = ctk.CTkFrame(s1, fg_color="transparent")
-        row1.pack(fill="x", padx=14, pady=(8, 2))
+        row1.pack(fill="x", padx=14, pady=(6, 2))
         ctk.CTkLabel(row1, text="Follow-Up Listening Window:", font=ctk.CTkFont(size=12, weight="bold"), text_color="#f8fafc").pack(side="left")
         
         curr_timeout = float(self.config.get("follow_up_timeout", 8.0))
@@ -1472,23 +1500,23 @@ class JarvisDashboard:
         # Row 2: Silence limit (Endpointing)
         row2 = ctk.CTkFrame(s1, fg_color="transparent")
         row2.pack(fill="x", padx=14, pady=(6, 2))
-        ctk.CTkLabel(row2, text="Silence Cutoff Speed:", font=ctk.CTkFont(size=12, weight="bold"), text_color="#f8fafc").pack(side="left")
+        ctk.CTkLabel(row2, text="Silence Cutoff Speed (VAD):", font=ctk.CTkFont(size=12, weight="bold"), text_color="#f8fafc").pack(side="left")
 
-        curr_silence = self.config.get("silence_limit", 1.2)
-        curr_silence_str = f"{curr_silence:.2f}s"
+        curr_silence = float(self.config.get("silence_limit", 2.0))
+        curr_silence_str = f"{curr_silence:.1f}s"
         self.silence_seg = ctk.CTkSegmentedButton(
             row2,
-            values=["0.60s", "0.80s", "1.00s", "1.20s", "1.50s", "2.00s"],
+            values=["1.0s", "1.5s", "2.0s", "2.5s", "3.0s"],
             command=self._on_silence_change,
             selected_color="#2563eb",
             height=28
         )
-        self.silence_seg.set(curr_silence_str)
+        self.silence_seg.set(curr_silence_str if curr_silence_str in ["1.0s", "1.5s", "2.0s", "2.5s", "3.0s"] else "2.0s")
         self.silence_seg.pack(side="right")
 
         ctk.CTkLabel(
             s1,
-            text="How quickly Jarvis detects you finished speaking and begins transcription.",
+            text="How long silence/pauses are allowed before Jarvis stops recording in Auto-Silence mode (default 2.0s).",
             font=ctk.CTkFont(size=10),
             text_color="#64748b"
         ).pack(anchor="w", padx=14, pady=(0, 8))
@@ -1973,6 +2001,17 @@ class JarvisDashboard:
         self.stop_test_btn.configure(state="disabled")
         self.vu_bar.set(0.0)
         self.vu_text.configure(text="Status: Stopped by user.", text_color="#94a3b8")
+
+    def _on_listening_mode_change(self, value: str):
+        try:
+            mode = "toggle" if "Toggle" in value else "vad"
+            self.config["listening_mode"] = mode
+            save_config(self.config)
+            self.set_recording_state(self._is_recording)
+            if self.on_update_settings:
+                self.on_update_settings(self.config)
+        except Exception:
+            pass
 
     def _on_timeout_change(self, value: str):
         try:

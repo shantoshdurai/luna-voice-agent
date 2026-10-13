@@ -1,6 +1,11 @@
 @echo off
 cd /d "%~dp0"
 
+if not exist "venv\Scripts\pythonw.exe" (
+    echo [Notice] First-time setup detected. Running setup.bat...
+    call "%~dp0setup.bat"
+)
+
 if "%1"=="--console" (
     title Jarvis AI Fast Agent (Console Debug Mode)
     color 0B

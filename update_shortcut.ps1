@@ -1,6 +1,6 @@
 $WshShell = New-Object -comObject WScript.Shell
 
-$RootDir = "C:\Users\Dog\Downloads\Gemma3-Assistant"
+$RootDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $TargetPath = "$RootDir\venv\Scripts\pythonw.exe"
 $Arguments = "fast_agent.py"
 $WorkingDirectory = $RootDir

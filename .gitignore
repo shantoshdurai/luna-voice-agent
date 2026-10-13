@@ -11,6 +11,7 @@ dist/
 models/
 *.wav
 *.mp3
+*.zip
 
 # Secrets, config, and local memory
 .env
@@ -21,3 +22,7 @@ memory.json
 # Editor folders
 .vscode/
 .idea/
+
+# Inspection and scratch artifacts
+openwhispr_inspect/
+localTranscriptionModels.js

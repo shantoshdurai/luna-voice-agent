@@ -899,6 +899,185 @@ def adjust_volume(action="increase", value=None):
         return "Volume mute toggled."
     return "Volume command executed."
 
+_ACTIVE_TIMERS = []
+
+def _automate_windows_clock(target_tab="stopwatch", auto_start=True, duration_mins=None):
+    """
+    Automates native Windows Clock via UIAutomation to switch to the exact tab
+    (Stopwatch, Timer, Alarm) and click Start so timers/stopwatches actually run.
+    """
+    initialized_com = False
+    try:
+        import comtypes
+        import comtypes.client
+        import win32gui
+
+        try:
+            comtypes.CoInitialize()
+            initialized_com = True
+        except Exception:
+            pass
+
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen.UIAutomationClient import (
+            CUIAutomation, IUIAutomation, TreeScope_Descendants,
+            IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern
+        )
+
+        user32 = ctypes.windll.user32
+        try:
+            hdesk = user32.OpenDesktopW('Default', 0, False, 0x01FF)
+            if hdesk:
+                user32.SetThreadDesktop(hdesk)
+        except Exception:
+            pass
+
+        uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+
+        clock_hwnd = None
+        for _ in range(25):
+            def enum_cb(h, _):
+                nonlocal clock_hwnd
+                if win32gui.IsWindowVisible(h):
+                    t = win32gui.GetWindowText(h)
+                    c = win32gui.GetClassName(h)
+                    if (c in ("ApplicationFrameWindow", "Windows.UI.Core.CoreWindow")) and ("clock" in t.lower() or "alarms" in t.lower()):
+                        clock_hwnd = h
+                        return False
+                return True
+            win32gui.EnumWindows(enum_cb, None)
+            if clock_hwnd:
+                break
+            time.sleep(0.2)
+
+        if not clock_hwnd:
+            return
+
+        elem = uia.ElementFromHandle(clock_hwnd)
+
+        # Tab button Automation IDs in Windows 11 Clock
+        btn_ids = {
+            "stopwatch": "StopwatchButton",
+            "timer": "TimerButton",
+            "alarm": "AlarmButton",
+            "clock": "ClockButton"
+        }
+        btn_id = btn_ids.get(target_tab, "StopwatchButton")
+
+        cond_btn = uia.CreatePropertyCondition(30011, btn_id) # UIA_AutomationIdPropertyId
+        tab_btn = elem.FindFirst(TreeScope_Descendants, cond_btn)
+        if tab_btn:
+            try:
+                pattern = tab_btn.GetCurrentPattern(10010) # UIA_SelectionItemPatternId
+                sel = pattern.QueryInterface(IUIAutomationSelectionItemPattern)
+                sel.Select()
+            except Exception:
+                try:
+                    pattern = tab_btn.GetCurrentPattern(10000) # UIA_InvokePatternId
+                    inv = pattern.QueryInterface(IUIAutomationInvokePattern)
+                    inv.Invoke()
+                except Exception:
+                    pass
+
+        time.sleep(0.4)
+
+        # Auto-start stopwatch or timer if requested
+        if auto_start:
+            if target_tab == "stopwatch":
+                cond_start = uia.CreatePropertyCondition(30011, "StopwatchPlayPauseButton")
+                start_btn = elem.FindFirst(TreeScope_Descendants, cond_start)
+                if not start_btn:
+                    cond_name = uia.CreatePropertyCondition(30005, "Start")
+                    start_btn = elem.FindFirst(TreeScope_Descendants, cond_name)
+                if start_btn:
+                    try:
+                        pattern = start_btn.GetCurrentPattern(10000)
+                        inv = pattern.QueryInterface(IUIAutomationInvokePattern)
+                        inv.Invoke()
+                    except Exception:
+                        pass
+            elif target_tab == "timer" and duration_mins:
+                # Look for matching timer tile play button
+                cond_play = uia.CreatePropertyCondition(30011, "TimerPlayPauseButton")
+                play_btns = elem.FindAll(TreeScope_Descendants, cond_play)
+                if play_btns and play_btns.Length > 0:
+                    idx = 0
+                    if duration_mins <= 1: idx = 0
+                    elif duration_mins <= 3: idx = 1
+                    elif duration_mins <= 5: idx = 2
+                    elif duration_mins <= 10: idx = 3
+                    if idx < play_btns.Length:
+                        target_btn = play_btns.GetElement(idx)
+                        try:
+                            pattern = target_btn.GetCurrentPattern(10000)
+                            inv = pattern.QueryInterface(IUIAutomationInvokePattern)
+                            inv.Invoke()
+                        except Exception:
+                            pass
+    except Exception as e:
+        print(f"⚠️ [Clock Automation Notice]: {e}")
+    finally:
+        if initialized_com:
+            try:
+                import comtypes
+                comtypes.CoUninitialize()
+            except Exception:
+                pass
+
+def clock_control(action="timer", duration_seconds=None, title=None):
+    """
+    Controls native Windows Clock app (Timer, Stopwatch, Alarm, World Clock).
+    Actions:
+    - 'timer': Opens Windows Clock Timer tab, auto-starts countdown, and schedules voice completion chime
+    - 'stopwatch': Opens Windows Clock Stopwatch tab and immediately starts the stopwatch counting
+    - 'alarm': Opens Windows Clock Alarm tab
+    - 'clock': Opens Windows Clock app
+    """
+    act = (action or "clock").lower().strip()
+    user32 = ctypes.windll.user32
+    try:
+        hdesk = user32.OpenDesktopW('Default', 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
+
+    if "stopwatch" in act:
+        subprocess.Popen(["explorer.exe", "ms-clock:"])
+        threading.Thread(target=_automate_windows_clock, args=("stopwatch", True, None), daemon=True).start()
+        return "Started Stopwatch in Windows Clock."
+    elif "alarm" in act:
+        subprocess.Popen(["explorer.exe", "ms-clock:"])
+        threading.Thread(target=_automate_windows_clock, args=("alarm", False, None), daemon=True).start()
+        return "Opened Alarms in Windows Clock."
+    elif "timer" in act:
+        subprocess.Popen(["explorer.exe", "ms-clock:"])
+        mins = (float(duration_seconds) / 60.0) if (duration_seconds and float(duration_seconds) > 0) else None
+        threading.Thread(target=_automate_windows_clock, args=("timer", True, mins), daemon=True).start()
+        if duration_seconds and float(duration_seconds) > 0:
+            secs = float(duration_seconds)
+            mins_int = int(secs // 60)
+            rem_secs = int(secs % 60)
+            dur_str = f"{mins_int} minute{'s' if mins_int != 1 else ''}" if mins_int > 0 and rem_secs == 0 else f"{int(secs)} seconds"
+
+            def _timer_worker():
+                time.sleep(secs)
+                try:
+                    import winsound
+                    for _ in range(3):
+                        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                        time.sleep(0.4)
+                except Exception:
+                    pass
+            th = threading.Thread(target=_timer_worker, daemon=True)
+            th.start()
+            _ACTIVE_TIMERS.append(th)
+            return f"Started a {dur_str} timer in Windows Clock."
+        return "Opened Timer in Windows Clock."
+    else:
+        subprocess.Popen(["explorer.exe", "ms-clock:"])
+        return "Opened Windows Clock."
+
 def get_installed_games():
     """Finds all games installed on this computer (Steam, Epic, Desktop shortcuts, Registry)."""
     games = set()
@@ -1015,22 +1194,54 @@ def resolve_folder_path(folder_name=""):
             if os.path.exists(candidate):
                 return candidate, "Work"
 
+    # 2b. Game & AppData directory resolution (Minecraft, TLauncher, .minecraft, .tlauncher)
+    appdata_roaming = os.environ.get("APPDATA", os.path.join(user_home, "AppData", "Roaming"))
+    appdata_local = os.environ.get("LOCALAPPDATA", os.path.join(user_home, "AppData", "Local"))
+    if "minecraft" in raw or "tlauncher" in raw:
+        game_candidates = [
+            os.path.join(appdata_roaming, ".minecraft"),
+            os.path.join(appdata_roaming, ".tlauncher"),
+            os.path.join(user_home, ".minecraft"),
+            os.path.join(user_home, ".tlauncher"),
+            os.path.join(appdata_roaming, "Minecraft"),
+            os.path.join(appdata_local, "Minecraft"),
+        ]
+        if "tlauncher" in raw:
+            game_candidates.insert(0, os.path.join(appdata_roaming, ".tlauncher"))
+        for gc in game_candidates:
+            if os.path.exists(gc):
+                title = "TLauncher" if "tlauncher" in os.path.basename(gc).lower() else "Minecraft"
+                return gc, title
+
     # 3. Direct absolute or user path
     if folder_name:
         p = os.path.expanduser(folder_name.strip("'\""))
         if os.path.exists(p):
             return p, os.path.basename(p) or p
 
-    # 4. Search top-level user directories or root drives for a matching folder name
+    # 4. Search top-level user directories, root drives, and AppData for a matching folder name
     clean_target = re.sub(r'\b(folder|dir|directory)\b', '', raw).strip()
+    clean_target_no_spaces = clean_target.replace(" ", "")
     if clean_target:
-        for base in [r"C:\\", r"D:\\", user_home, os.path.join(user_home, "Desktop"), os.path.join(user_home, "Downloads")]:
+        search_bases = [
+            r"C:\\", r"D:\\", user_home,
+            os.path.join(user_home, "Desktop"),
+            os.path.join(user_home, "Downloads"),
+            appdata_roaming,
+            appdata_local
+        ]
+        for base in search_bases:
             if os.path.exists(base):
                 try:
                     for entry in os.listdir(base):
-                        if entry.lower() == clean_target and os.path.isdir(os.path.join(base, entry)):
+                        entry_lower = entry.lower()
+                        if (entry_lower == clean_target or
+                            entry_lower == f".{clean_target}" or
+                            entry_lower.replace(" ", "") == clean_target_no_spaces or
+                            entry_lower.replace(" ", "") == f".{clean_target_no_spaces}"):
                             p = os.path.join(base, entry)
-                            return p, entry
+                            if os.path.isdir(p):
+                                return p, entry.lstrip(".")
                 except Exception:
                     pass
 
@@ -1153,9 +1364,42 @@ def get_system_health():
 
 def web_search(query):
     """Searches the live web for recent information, models, news, and facts."""
+    import html as html_lib
     clean_q = (query or "").strip().strip("'\"")
     if not clean_q:
         return "Please provide a search query."
+
+    # 0. DuckDuckGo Instant Answer API (Sub-200ms clean encyclopedic abstract)
+    try:
+        ddg_api_url = "https://api.duckduckgo.com/?q=" + urllib.parse.quote(clean_q) + "&format=json&no_html=1&skip_disambig=1"
+        req_api = urllib.request.Request(ddg_api_url, headers={"User-Agent": "JarvisAssistant/1.0"})
+        with urllib.request.urlopen(req_api, timeout=4) as resp_api:
+            ddg_data = json.loads(resp_api.read().decode("utf-8"))
+        abstract = (ddg_data.get("AbstractText") or "").strip()
+        if abstract:
+            return f"- {abstract}"
+    except Exception:
+        pass
+
+    # 1. DuckDuckGo HTML Search
+    try:
+        ddg_url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(clean_q)
+        req = urllib.request.Request(ddg_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9"
+        })
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            html_text = resp.read().decode("utf-8", errors="ignore")
+        snippets = re.findall(r'<a class="result__snippet[^"]*"[^>]*>(.*?)</a>', html_text)
+        if not snippets:
+            snippets = re.findall(r'<td class="result-snippet"[^>]*>(.*?)</td>', html_text)
+        clean = [html_lib.unescape(re.sub(r'<[^>]+>', '', s).strip()) for s in snippets if s.strip()]
+        if clean:
+            return "\n".join([f"- {c}" for c in clean[:4]])
+    except Exception:
+        pass
+
+    # 2. Bing Search Fallback
     try:
         url = "https://www.bing.com/search?q=" + urllib.parse.quote(clean_q)
         req = urllib.request.Request(url, headers={
@@ -1165,20 +1409,26 @@ def web_search(query):
         with urllib.request.urlopen(req, timeout=5) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
         snippets = re.findall(r'<p class="b_lineclamp[^"]*"[^>]*>(.*?)</p>', html)
-        clean = [re.sub(r'<[^>]+>', '', s).strip() for s in snippets[:4] if s.strip()]
+        clean = [html_lib.unescape(re.sub(r'<[^>]+>', '', s).strip()) for s in snippets[:4] if s.strip()]
         if clean:
             return "\n".join([f"- {c}" for c in clean])
     except Exception:
         pass
 
-    # Wikipedia fallback
+    # 3. Wikipedia OpenSearch Fallback
     try:
-        wiki_url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(clean_q.split()[0])
-        req = urllib.request.Request(wiki_url, headers={"User-Agent": "JarvisAssistant/1.0"})
+        search_api = "https://en.wikipedia.org/w/api.php?action=opensearch&format=json&limit=1&search=" + urllib.parse.quote(clean_q)
+        req = urllib.request.Request(search_api, headers={"User-Agent": "JarvisAssistant/1.0"})
         with urllib.request.urlopen(req, timeout=4) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        if data.get("extract"):
-            return f"- {data.get('extract')}"
+        if len(data) > 1 and data[1]:
+            best_title = data[1][0]
+            summary_api = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(best_title)
+            req2 = urllib.request.Request(summary_api, headers={"User-Agent": "JarvisAssistant/1.0"})
+            with urllib.request.urlopen(req2, timeout=4) as resp2:
+                sdata = json.loads(resp2.read().decode("utf-8"))
+            if sdata.get("extract"):
+                return f"- {sdata.get('extract')}"
     except Exception:
         pass
 
@@ -1541,6 +1791,52 @@ def detect_and_run_intent(text):
             res = adjust_volume("mute")
             return True, f"[Action: {res}]", "Toggled volume mute for you.", False
 
+    # 4c. Windows Clock, Timer, Stopwatch & Alarm Intent
+    # e.g. "set five minutes stopwatch", "start stopwatch", "open stopwatch", "set a timer for 5 minutes", "5 minute timer", "set alarm"
+    has_stopwatch = any(k in t for k in ["stopwatch", "stop watch"])
+    has_timer = any(k in t for k in ["timer", "countdown"])
+    has_alarm = any(k in t for k in ["alarm", "alarms"])
+    has_clock = any(k in t for k in ["clock", "open clock", "launch clock"]) and not (has_stopwatch or has_timer or has_alarm)
+
+    if has_stopwatch or has_timer or has_alarm or has_clock:
+        # Extract duration if present: e.g. "5 minutes", "30 seconds", "1 hour"
+        m_m = re.search(r'(\d+)\s*(?:min|minute|minutes|m\b)', t)
+        m_s = re.search(r'(\d+)\s*(?:sec|second|seconds|s\b)', t)
+        m_h = re.search(r'(\d+)\s*(?:hour|hours|hr|hrs\b)', t)
+
+        tot_secs = 0
+        if m_h:
+            tot_secs += int(m_h.group(1)) * 3600
+        if m_m:
+            tot_secs += int(m_m.group(1)) * 60
+        if m_s:
+            tot_secs += int(m_s.group(1))
+
+        if not (m_h or m_m or m_s):
+            m_num = re.search(r'\b(?:set|for|sit)\s+(\d+)\b', t)
+            if m_num:
+                tot_secs = int(m_num.group(1)) * 60
+
+        dur_sec = tot_secs if tot_secs > 0 else None
+        dur_label = f"{dur_sec // 60} minute" if (dur_sec and dur_sec >= 60) else (f"{dur_sec} second" if dur_sec else "")
+
+        if has_stopwatch:
+            res = clock_control("stopwatch", duration_seconds=dur_sec)
+            speech = "Starting the Stopwatch in Windows Clock for you."
+            return True, f"[Action: {res}]", speech, False
+        elif has_timer:
+            res = clock_control("timer", duration_seconds=dur_sec)
+            speech = f"Opening Windows Clock and starting a {dur_label} timer for you." if dur_sec else "Opening the Timer in Windows Clock for you."
+            return True, f"[Action: {res}]", speech, False
+        elif has_alarm:
+            res = clock_control("alarm")
+            speech = "Opening Alarms in Windows Clock for you."
+            return True, f"[Action: {res}]", speech, False
+        elif has_clock:
+            res = clock_control("clock")
+            speech = "Opening Windows Clock for you."
+            return True, f"[Action: {res}]", speech, False
+
     # 4b. Browser Tab & Playback Control ("play it", "it is not playing", "resume", "pause", "next tab", "previous tab", "close tab", "what is the url")
     if any(p in t for p in ["it is not playing", "it's not playing", "not playing", "play the song", "play it", "resume the video", "pause the video", "pause the song", "resume playback", "toggle play"]):
         res = browser_control("play_pause")
@@ -1566,41 +1862,69 @@ def detect_and_run_intent(text):
         res = browser_control("get_url")
         return True, f"[Action: {res}]", res, False
 
-    # 5. YouTube Intent (clean extraction, direct playback vs search, frank fallback)
+    # 5. YouTube Intent (clean extraction, conversational filler stripping, direct playback vs search)
     is_play_music = t.startswith("play ") and any(w in t for w in ["music", "song", "theme", "track", "audio", "video", "ost", "lofi", "beats", "remix"])
-    if ("youtube" in t and any(w in t for w in ["open", "play", "launch", "start", "show", "watch", "want", "search"])) or is_play_music:
+    if ("youtube" in t and any(w in t for w in ["open", "play", "launch", "start", "show", "watch", "want", "search", "find", "video", "tutorial"])) or is_play_music:
         clean = re.sub(r'^(hey\s+jarvis\s*,?\s*|jarvis\s*,?\s*)', '', t)
-        m = re.search(r'play\s+(.+?)(?:\s+on|\s+in)?\s+youtube', clean)
+        # Strip conversational fillers
+        fillers = [
+            r'\buh\b', r'\bum\b', r'\byou know\b', r'\bi mean\b', r'\bi told you that\b',
+            r'\bi told told you that\b', r'\blike\b', r'\bso\b', r'\bactually\b'
+        ]
+        norm = clean
+        for f in fillers:
+            norm = re.sub(f, '', norm)
+        norm = re.sub(r'\s+', ' ', norm).strip()
+
+        # Phonetic & mishearing normalizations
+        norm = re.sub(r'\bas a bigger\b', 'for beginners', norm)
+        norm = re.sub(r'\bbigger\b', 'beginner', norm)
+        norm = re.sub(r'\blanding numpy\b', 'learning numpy', norm)
+
+        # Check for explicit homepage requests
+        is_homepage_request = norm in [
+            "open youtube", "open the youtube", "launch youtube", "go to youtube",
+            "youtube", "open youtube homepage", "youtube homepage"
+        ]
+        if is_homepage_request:
+            res = open_url("https://www.youtube.com", browser=browser)
+            speech = f"Opening YouTube in {browser.title()} for you." if browser else "Opening YouTube for you."
+            return True, f"[Action: {res}]", speech, False
+
+        # Extract search or playback query
+        m = re.search(r'play\s+(.+?)(?:\s+on|\s+in)?\s+youtube', norm)
         if not m:
-            m = re.search(r'(?:search\s+(?:on\s+)?youtube\s+for|youtube\s+search\s+(?:for\s+)?)(.+)', clean)
+            m = re.search(r'(?:search\s+(?:on\s+)?youtube\s+for|youtube\s+search\s+(?:for\s+)?)(.+)', norm)
         if not m:
-            m = re.search(r'open\s+youtube(?:\s+(?:and|to)\s+(?:search|play))?\s+(.+)', clean)
+            m = re.search(r'open\s+youtube(?:\s+(?:and|to)\s+(?:search|play))?\s+(.+)', norm)
+        if not m:
+            # e.g. "i want a [best] [youtube] video [where/to/for/about] X"
+            m = re.search(r'(?:want|find|show|watch|get|give me|look for)\s+(?:a\s+|the\s+)?(?:best\s+|good\s+)?(?:youtube\s+video|video\s+on\s+youtube|video|tutorial)\s+(?:where\s+i\s+can\s+|where\s+|to\s+|for\s+|about\s+|on\s+|how\s+to\s+)?(.+)', norm)
+        if not m:
+            # e.g. "youtube video [where/to/for/about] X"
+            m = re.search(r'(?:youtube\s+video|video\s+on\s+youtube)\s+(?:where\s+i\s+can\s+|where\s+|to\s+|for\s+|about\s+|on\s+|how\s+to\s+)?(.+)', norm)
         if not m and is_play_music:
-            m = re.search(r'play\s+(.+)', clean)
+            m = re.search(r'play\s+(.+)', norm)
 
         query = m.group(1).strip() if m else ""
         query = re.sub(r'\b(in\s+my\s+browser|in\s+browser|in\s+helium|in\s+firefox|in\s+chrome|please|for\s+me|tab|video|videos)\b', '', query).strip()
         query = re.sub(r'^(for|about|with|the)\s+', '', query).strip()
         query = query.strip('\'".,?! ')
 
-        if query in ["", "homepage", "app", "site", "website"]:
-            res = open_url("https://www.youtube.com", browser=browser)
-            speech = f"Opening YouTube in {browser.title()} for you." if browser else "Opening YouTube for you."
-            return True, f"[Action: {res}]", speech, False
-        elif query in ["something", "a video", "any video", "videos"]:
-            res = open_url("https://www.youtube.com", browser=browser)
-            speech = "I opened YouTube for you. To be frank, I wasn't sure what specific video or search you wanted, so I opened the homepage for you."
-            return True, f"[Action: {res}]", speech, False
-        else:
-            if any(w in t for w in ["play", "watch", "listen", "song", "music", "theme", "track", "lofi"]):
+        if query and query not in ["", "homepage", "app", "site", "website", "something", "a video", "any video", "videos"]:
+            if any(w in t for w in ["play", "watch", "listen", "song", "music", "theme", "track", "lofi", "video", "tutorial", "want", "learn"]):
                 res = play_video(query, browser=browser)
-                speech = f"Playing {query} on YouTube."
+                speech = f"Playing '{query}' on YouTube."
                 return True, f"[Action: {res}]", speech, False
             else:
                 target = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
                 res = open_url(target, browser=browser)
                 speech = f"Searching YouTube for {query}."
                 return True, f"[Action: Opened YouTube search for '{query}' ({target})]", speech, False
+        elif any(p in t for p in ["open youtube", "launch youtube", "go to youtube", "open the youtube"]):
+            res = open_url("https://www.youtube.com", browser=browser)
+            speech = f"Opening YouTube in {browser.title()} for you." if browser else "Opening YouTube for you."
+            return True, f"[Action: {res}]", speech, False
 
     # 6. LeetCode Intent (smart GraphQL daily resolver, slug verification, frank fallback)
     if "leetcode" in t and any(w in t for w in ["open", "show", "go to", "solve", "want", "do", "find", "challenge"]):
@@ -1697,14 +2021,18 @@ def detect_and_run_intent(text):
                 res = close_app(proc_target)
                 return True, f"[Action: {res}]", res, False
 
-    # 13c. Folder Intent ("open work folder", "open downloads", "open pictures", "open folder C:/...")
-    if ("open" in t or "show" in t or "explore" in t) and any(w in t for w in ["folder", "downloads", "pictures", "desktop", "documents", "work", "workspace"]):
-        m = re.search(r'(?:open|show|explore)\s+(?:my\s+)?(?:folder\s+)?([a-zA-Z0-9_:\\/-]+)(?:\s+folder)?', t)
+    # 13c. Folder Intent ("open work folder", "open downloads", "open pictures", "open minecraft tlauncher folder")
+    if ("open" in t or "show" in t or "explore" in t) and any(w in t for w in ["folder", "downloads", "pictures", "desktop", "documents", "work", "workspace", "minecraft", "tlauncher"]):
+        # Extract folder target cleanly between command verb and optional 'folder' suffix
+        m = re.search(r'(?:open|show|explore)\s+(?:my\s+)?(?:the\s+)?(.+?)(?:\s+folder)?$', t)
         folder = m.group(1).strip() if m else ""
-        if folder in ("my", "the", "a"):
+        folder = re.sub(r'^(my|the|a)\s+', '', folder).strip()
+        folder = re.sub(r'\s+folder$', '', folder).strip()
+        if not folder or folder in ("it", "that", "this"):
             folder = "work" if "work" in t else "downloads"
         res = open_folder(folder)
-        return True, f"[Action: {res}]", f"Opening {folder.capitalize()} folder for you.", False
+        p, display_name = resolve_folder_path(folder)
+        return True, f"[Action: {res}]", f"Opening {display_name} folder for you.", False
 
     # 14. Terminal CLI Command Intent ("run command ipconfig", "run dir")
     if t.startswith("run command ") or t.startswith("execute command ") or t.startswith("run cli "):

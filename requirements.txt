@@ -7,12 +7,11 @@ soundfile
 numpy
 scipy
 huggingface_hub
-llama-cpp-python
+pycaw
 pyaudio
 pystray
 pillow
 psutil
-pynvml
 nvidia-ml-py
 customtkinter
 pywin32
@@ -27,4 +26,6 @@ onnxruntime
 pynput
 python-dotenv
 pyttsx3
+sherpa-onnx
+comtypes
 

@@ -1880,6 +1880,11 @@ def detect_and_run_intent(text):
         norm = re.sub(r'\bas a bigger\b', 'for beginners', norm)
         norm = re.sub(r'\bbigger\b', 'beginner', norm)
         norm = re.sub(r'\blanding numpy\b', 'learning numpy', norm)
+        norm = re.sub(r'\bra expect sell\b', 'array except self', norm)
+        norm = re.sub(r'\bproduct of ra\b', 'product of array', norm)
+        norm = re.sub(r'\bexpensive\s+(?:lead\s*code|leetcode)\b', 'except self leetcode', norm)
+        norm = re.sub(r'\b(?:expensive|expect\s+sell)\b', 'except self', norm)
+        norm = re.sub(r'\blead code\b', 'leetcode', norm)
 
         # Check for explicit homepage requests
         is_homepage_request = norm in [
@@ -1892,7 +1897,10 @@ def detect_and_run_intent(text):
             return True, f"[Action: {res}]", speech, False
 
         # Extract search or playback query
-        m = re.search(r'play\s+(.+?)(?:\s+on|\s+in)?\s+youtube', norm)
+        # 1. "open/play/show/watch X on/in youtube"
+        m = re.search(r'(?:i\s+want\s+(?:you\s+to\s+)?|can\s+you\s+)?(?:open|play|show|watch|find|get)\s+(.+?)\s+(?:on|in)\s+youtube', norm)
+        if not m:
+            m = re.search(r'play\s+(.+?)(?:\s+on|\s+in)?\s+youtube', norm)
         if not m:
             m = re.search(r'(?:search\s+(?:on\s+)?youtube\s+for|youtube\s+search\s+(?:for\s+)?)(.+)', norm)
         if not m:
@@ -2044,15 +2052,15 @@ def detect_and_run_intent(text):
             action_msg = f"[Action: Executed `{cmd}`]\n{preview}"
             return True, action_msg, f"Command {cmd} executed.", False
 
-    # 15. Application Launch Intent
-    if any(w in t for w in ["open", "launch", "start", "run"]):
-        if "vs code" in t or "vscode" in t or "code" in t:
+    # 15. Application Launch Intent (strictly check for app launch, ignore if tutorial/video/problem/search)
+    if any(w in t for w in ["open", "launch", "start", "run"]) and not any(w in t for w in ["youtube", "video", "tutorial", "search", "problem", "explain", "how to", "lead code", "leetcode"]):
+        if re.search(r'\b(vs\s*code|vscode|visual\s+studio\s+code)\b', t) or re.search(r'^(?:open|launch|start|run)\s+(?:the\s+)?code$', t):
             res = open_app("code")
             return True, f"[Action: {res}]", "Launching Visual Studio Code for you.", False
-        for app in ["helium", "browser", "firefox", "chrome", "notepad", "terminal", "powershell", "cmd", "calculator", "calc", "explorer"]:
-            if re.search(r'\b' + app + r'\b', t):
+        for app in ["helium", "firefox", "chrome", "notepad", "terminal", "powershell", "cmd", "calculator", "calc", "explorer"]:
+            if re.search(r'\b(?:open|launch|start|run)\s+(?:my\s+)?(?:the\s+)?' + app + r'\b', t) or re.search(r'\b' + app + r'\s+(?:app|application|browser)\b', t):
                 res = open_app(app)
-                app_disp = "Helium Browser" if app in ("helium", "browser") else app.capitalize()
+                app_disp = "Helium Browser" if app == "helium" else app.capitalize()
                 return True, f"[Action: {res}]", f"Launching {app_disp} for you.", False
 
     return False, None, None, False

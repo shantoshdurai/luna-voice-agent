@@ -936,6 +936,8 @@ class FastAgent:
         # 5. Microphone Stream
         self.audio = pyaudio.PyAudio()
         self.mic_lock = threading.Lock()
+        self.noise_floor = 60.0
+        self.speech_threshold = 240.0
         self.input_device_name = self.config.get("input_device_name", "Default (System Default)")
         self.mic_stream = None
         self._init_mic_stream(self.input_device_name)
@@ -1068,9 +1070,10 @@ class FastAgent:
                     calib_frames.append(np.frombuffer(data, dtype=np.int16))
                 if calib_frames:
                     all_calib = np.concatenate(calib_frames)
-                    self.noise_floor = int(np.abs(all_calib).mean())
-                    self.speech_threshold = max(800, int(self.noise_floor * 1.35))
-                    print(f"[OK] Calibrated noise floor: {self.noise_floor} | Speech threshold: {self.speech_threshold}")
+                    raw_floor = float(np.abs(all_calib).mean())
+                    self.noise_floor = min(300.0, max(20.0, raw_floor))
+                    self.speech_threshold = max(180.0, min(500.0, self.noise_floor * 1.4 + 60.0))
+                    print(f"[OK] Calibrated noise floor: {self.noise_floor:.1f} | Speech threshold: {self.speech_threshold:.1f}")
             except Exception as e:
                 print(f"[Warning] Noise calibration error: {e}")
 
@@ -1304,14 +1307,15 @@ class FastAgent:
         if hasattr(self, "dashboard") and self.dashboard:
             self.dashboard.set_recording_state(True)
 
-        frames = []
+        stored_pre_roll = list(pre_roll_chunks) if pre_roll_chunks else []
+        frames = list(stored_pre_roll) if stored_pre_roll else []
         silent_chunks = 0
         chunks_per_sec = RATE / CHUNK
         max_total_chunks = int(max_duration * chunks_per_sec)
         timeout_chunks = int(start_timeout * chunks_per_sec)
-        talking_started = False
+        talking_started = bool(stored_pre_roll)
+        has_new_speech = False
         talking_start_chunk = 0
-        stored_pre_roll = list(pre_roll_chunks) if pre_roll_chunks else []
 
         # Ring buffer for preserving initial pre-speech syllable without accumulating ambient room noise
         silence_pre_buffer = collections.deque(maxlen=4)
@@ -1374,10 +1378,7 @@ class FastAgent:
                                 talking_start_chunk = i
                                 if self.pill:
                                     self.pill.set_state("recording")
-                                if stored_pre_roll and i <= 6:
-                                    frames = list(stored_pre_roll) + list(silence_pre_buffer) + [data]
-                                else:
-                                    frames = list(silence_pre_buffer) + [data]
+                                frames = list(silence_pre_buffer) + [data]
                                 silent_chunks = 0
                         else:
                             consecutive_speech_chunks = 0
@@ -1390,12 +1391,20 @@ class FastAgent:
                         frames.append(data)
                         if volume > self.speech_threshold:
                             silent_chunks = 0
+                            has_new_speech = True
+                            if self.pill and self.pill.state != "recording":
+                                self.pill.set_state("recording")
                         else:
                             silent_chunks += 1
 
                         # Adaptive conversational pause: extend pause window for natural breathing/thought pauses
                         spoken_duration = (i - talking_start_chunk) * (CHUNK / RATE)
-                        effective_silence = max(silence_limit, 2.0) if spoken_duration > 1.0 else silence_limit
+                        # If triggered by wake word and user hasn't continued speaking, 1.2s silence confirms pure wake greeting
+                        if stored_pre_roll and not has_new_speech:
+                            effective_silence = min(1.2, silence_limit)
+                        else:
+                            effective_silence = max(silence_limit, 2.0) if spoken_duration > 1.0 else silence_limit
+
                         if silent_chunks > int(effective_silence * chunks_per_sec):
                             # Silence detected! Transition immediately to processing state
                             if self.pill:
@@ -2174,11 +2183,11 @@ class FastAgent:
                 print(f"[Session idle -> Entering standby sleep]")
                 break
 
-            # Reject low-energy ambient breaths / mic pops
-            avg_volume = float(np.abs(audio_data).mean()) if len(audio_data) > 0 else 0
+            # Reject transient mic pops / sub-350ms clicks
             audio_duration = len(audio_data) / RATE
-            if audio_duration < 0.45 or avg_volume < self.noise_floor * 1.2:
-                print(f"[Low energy/ambient breath ignored ({audio_duration:.2f}s, vol={avg_volume:.1f}) -> Standby sleep]")
+            peak_volume = float(np.max(np.abs(audio_data))) if len(audio_data) > 0 else 0.0
+            if audio_duration < 0.35 or peak_volume < (self.speech_threshold * 0.75):
+                print(f"[Transient noise ignored ({audio_duration:.2f}s, peak={peak_volume:.1f}) -> Standby sleep]")
                 break
 
             if self.pill:
@@ -2285,7 +2294,7 @@ class FastAgent:
                     custom_wws = [w for w in self.wake_words if not any(k in w for k in oww_models_map)]
                     if custom_wws and self.stt is not None:
                         vol = float(np.abs(audio_data).mean())
-                        thresh = getattr(self, "speech_threshold", 800) or 800
+                        thresh = getattr(self, "speech_threshold", 240.0) or 240.0
                         is_speech = vol > thresh
 
                         if is_speech:

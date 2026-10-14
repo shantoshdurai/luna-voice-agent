@@ -70,7 +70,10 @@ import subprocess
 import urllib.request
 import urllib.parse
 import uuid
+import logging
 from typing import Optional, Dict, Any, List, Tuple
+
+logger = logging.getLogger("JarvisFastAgent")
 
 import numpy as np
 import pyaudio
@@ -1931,6 +1934,12 @@ class FastAgent:
                 if self.pill:
                     self.pill.set_state("speaking")
                 pygame.mixer.music.play()
+                # Ensure playback stream has actually initiated before polling get_busy()
+                for _ in range(15):
+                    if pygame.mixer.music.get_busy():
+                        break
+                    time.sleep(0.01)
+
                 t_play_start = time.time()
                 while pygame.mixer.music.get_busy():
                     elapsed = time.time() - t_play_start
@@ -1954,32 +1963,46 @@ class FastAgent:
                     os.remove(temp_audio)
                 except Exception:
                     pass
-        except Exception:
-            # SAPI fallback
+        except Exception as e:
+            # Fallback to local offline TTS if network / Edge-TTS encounters any issue
+            logger.error(f"[TTS] Speech synthesis/playback error: {e}")
             tts_gen_time = time.time() - t0_gen
             try:
-                if self.sapi_engine:
-                    if self.pill:
-                        self.pill.set_state("speaking")
-                    sapi_busy = threading.Event()
-                    sapi_busy.set()
-                    def animate_sapi():
-                        t0_s = time.time()
-                        while sapi_busy.is_set():
-                            el = time.time() - t0_s
-                            v = 0.35 + 0.45 * (math.sin(el * 10.0) * math.cos(el * 5.5)) ** 2
-                            if self.pill:
-                                self.pill.update_volume(v)
-                            time.sleep(0.035)
-                    th = threading.Thread(target=animate_sapi, daemon=True)
-                    th.start()
+                if self.pill:
+                    self.pill.set_state("speaking")
+                sapi_busy = threading.Event()
+                sapi_busy.set()
+                def animate_sapi():
+                    t0_s = time.time()
+                    while sapi_busy.is_set():
+                        el = time.time() - t0_s
+                        v = 0.35 + 0.45 * (math.sin(el * 10.0) * math.cos(el * 5.5)) ** 2
+                        if self.pill:
+                            self.pill.update_volume(v)
+                        time.sleep(0.035)
+                th = threading.Thread(target=animate_sapi, daemon=True)
+                th.start()
+                try:
+                    import pythoncom, win32com.client
+                    pythoncom.CoInitialize()
+                    speaker = win32com.client.Dispatch("SAPI.SpVoice")
+                    speaker.Rate = 1
+                    speaker.Speak(clean_text)
+                    pythoncom.CoUninitialize()
+                except Exception as sapi_err:
+                    logger.error(f"[TTS] SAPI COM error: {sapi_err}")
                     try:
-                        self.sapi_engine.say(clean_text)
-                        self.sapi_engine.runAndWait()
-                    finally:
-                        sapi_busy.clear()
-            except Exception:
-                pass
+                        import pyttsx3
+                        engine = pyttsx3.init()
+                        engine.setProperty("rate", 185)
+                        engine.say(clean_text)
+                        engine.runAndWait()
+                    except Exception as pyttsx_err:
+                        logger.error(f"[TTS] pyttsx3 fallback error: {pyttsx_err}")
+                finally:
+                    sapi_busy.clear()
+            except Exception as ex:
+                logger.error(f"[TTS] Fallback animation error: {ex}")
         finally:
             if self.pill:
                 self.pill.update_volume(0.0)
